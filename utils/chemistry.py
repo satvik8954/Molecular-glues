@@ -1,111 +1,104 @@
 """
-Chemistry utilities for molecular validation and property calculation.
+Chemistry utility functions for molecular property calculation and validation.
 """
-from typing import Dict, Optional, Tuple
+from typing import Optional, Dict, List
 from rdkit import Chem
-from rdkit.Chem import Descriptors, rdMolDescriptors, AllChem
+from rdkit.Chem import (
+    Descriptors, rdMolDescriptors, AllChem,
+    DataStructs, QED as QEDModule,
+)
+from rdkit.Chem.Scaffolds import MurckoScaffold
+import numpy as np
 
 
-def is_valid_molecule(smiles: str) -> bool:
+def is_valid_molecule(mol_or_smiles) -> bool:
     """
-    Check if a SMILES string represents a valid molecule.
-    
+    Check if a molecule or SMILES string is chemically valid.
+
     Args:
-        smiles: SMILES string to validate
-        
-    Returns:
-        True if molecule is valid, False otherwise
-    """
-    if not smiles or not isinstance(smiles, str):
-        return False
-    
-    try:
-        mol = Chem.MolFromSmiles(smiles, sanitize=True)
-        return mol is not None
-    except Exception:
-        return False
+        mol_or_smiles: RDKit Mol object or SMILES string
 
-
-def check_valency(mol: Chem.Mol) -> bool:
-    """
-    Check if all atoms in the molecule have valid valencies.
-    
-    Args:
-        mol: RDKit molecule object
-        
     Returns:
-        True if all valencies are valid
+        True if valid molecule
     """
-    if mol is None:
-        return False
-    
     try:
-        # This will raise an exception if valencies are invalid
+        if isinstance(mol_or_smiles, str):
+            mol = Chem.MolFromSmiles(mol_or_smiles)
+        elif hasattr(mol_or_smiles, 'GetNumAtoms'):
+            mol = mol_or_smiles
+        else:
+            return False
+
+        if mol is None:
+            return False
+
+        # Try sanitization
         Chem.SanitizeMol(mol)
-        
-        # Additional check for explicit valence
-        for atom in mol.GetAtoms():
-            valence = atom.GetTotalValence()
-            atomic_num = atom.GetAtomicNum()
-            
-            # Define valid valences for common atoms
-            valid_valences = {
-                6: [4],           # Carbon
-                7: [3, 5],        # Nitrogen (3 for amines, 5 for nitro)
-                8: [2],           # Oxygen
-                16: [2, 4, 6],    # Sulfur
-                9: [1],           # Fluorine
-                17: [1, 3, 5, 7], # Chlorine
-                35: [1, 3, 5],    # Bromine
-                53: [1, 3, 5, 7], # Iodine
-                15: [3, 5],       # Phosphorus
-            }
-            
-            if atomic_num in valid_valences:
-                if valence not in valid_valences[atomic_num]:
-                    return False
-                    
         return True
     except Exception:
         return False
 
 
-def check_ring_stability(mol: Chem.Mol) -> bool:
+def check_valency(mol_or_smiles) -> bool:
     """
-    Check for stable ring systems (no highly strained rings).
-    
+    Check if all atoms have valid valency.
+
     Args:
-        mol: RDKit molecule object
-        
+        mol_or_smiles: RDKit Mol or SMILES
+
+    Returns:
+        True if all valencies are correct
+    """
+    try:
+        if isinstance(mol_or_smiles, str):
+            mol = Chem.MolFromSmiles(mol_or_smiles)
+        else:
+            mol = mol_or_smiles
+
+        if mol is None:
+            return False
+
+        # Sanitize checks valency
+        Chem.SanitizeMol(mol)
+        return True
+    except Chem.MolSanitizeException:
+        return False
+    except Exception:
+        return False
+
+
+def check_ring_stability(mol_or_smiles) -> bool:
+    """
+    Check if ring systems are stable (no 3-membered rings with double bonds, etc.).
+
+    Args:
+        mol_or_smiles: RDKit Mol or SMILES
+
     Returns:
         True if ring systems are stable
     """
-    if mol is None:
-        return False
-    
     try:
+        if isinstance(mol_or_smiles, str):
+            mol = Chem.MolFromSmiles(mol_or_smiles)
+        else:
+            mol = mol_or_smiles
+
+        if mol is None:
+            return False
+
         ring_info = mol.GetRingInfo()
-        
         for ring in ring_info.AtomRings():
-            ring_size = len(ring)
-            
-            # Flag highly strained 3-membered rings (but allow them in special cases)
-            if ring_size == 3:
-                # Check if it's a cyclopropane (might be intentional)
-                # We'll allow but could add stricter checks
-                pass
-            
-            # 4-membered rings are strained but sometimes valid
-            # 5+ membered rings are generally okay
-            
-        # Check for proper aromaticity
-        for atom in mol.GetAtoms():
-            if atom.GetIsAromatic():
-                # Aromatic atoms should be in aromatic rings
-                if not any(mol.GetRingInfo().IsAtomInRingOfSize(atom.GetIdx(), size) 
-                          for size in [5, 6, 7]):
-                    return False
-                    
+            if len(ring) < 3:
+                return False
+            # 3-membered rings with double bonds are unstable
+            if len(ring) == 3:
+                for idx in ring:
+                    atom = mol.GetAtomWithIdx(idx)
+                    for bond in atom.GetBonds():
+                        if bond.GetBondType() == Chem.BondType.DOUBLE:
+                            other = bond.GetOtherAtomIdx(idx)
+                            if other in ring:
+                                return False
         return True
     except Exception:
         return False
@@ -113,62 +106,110 @@ def check_ring_stability(mol: Chem.Mol) -> bool:
 
 def get_molecular_properties(mol_or_smiles) -> Optional[Dict[str, float]]:
     """
-    Calculate molecular properties relevant for drug-likeness.
-    
+    Calculate molecular properties.
+
     Args:
-        mol_or_smiles: RDKit molecule or SMILES string
-        
+        mol_or_smiles: RDKit Mol or SMILES string
+
     Returns:
-        Dictionary of molecular properties or None if invalid
+        Dictionary of properties or None if invalid
     """
-    # Handle SMILES input
-    if isinstance(mol_or_smiles, str):
-        mol = Chem.MolFromSmiles(mol_or_smiles)
-    else:
-        mol = mol_or_smiles
-    
-    if mol is None:
-        return None
-    
     try:
-        properties = {
-            # Basic properties
-            'molecular_weight': Descriptors.MolWt(mol),
+        if isinstance(mol_or_smiles, str):
+            mol = Chem.MolFromSmiles(mol_or_smiles)
+        else:
+            mol = mol_or_smiles
+
+        if mol is None:
+            return None
+
+        # Count ring Types
+        ring_info = mol.GetRingInfo()
+        num_rings = ring_info.NumRings()
+        num_aromatic_rings = Descriptors.NumAromaticRings(mol)
+
+        # Calculate Fsp3
+        num_sp3 = 0
+        num_carbons = 0
+        for atom in mol.GetAtoms():
+            if atom.GetAtomicNum() == 6:
+                num_carbons += 1
+                if atom.GetHybridization() == Chem.rdchem.HybridizationType.SP3:
+                    num_sp3 += 1
+        fraction_sp3 = num_sp3 / max(1, num_carbons)
+
+        # QED
+        qed_score = calculate_qed(mol)
+
+        return {
+            'molecular_weight': Descriptors.ExactMolWt(mol),
             'logp': Descriptors.MolLogP(mol),
+            'hbd': rdMolDescriptors.CalcNumHBD(mol),
+            'hba': rdMolDescriptors.CalcNumHBA(mol),
             'tpsa': Descriptors.TPSA(mol),
-            
-            # Lipinski properties
-            'hbd': rdMolDescriptors.CalcNumHBD(mol),  # H-bond donors
-            'hba': rdMolDescriptors.CalcNumHBA(mol),  # H-bond acceptors
             'rotatable_bonds': rdMolDescriptors.CalcNumRotatableBonds(mol),
-            
-            # Ring information
-            'num_rings': rdMolDescriptors.CalcNumRings(mol),
-            'num_aromatic_rings': rdMolDescriptors.CalcNumAromaticRings(mol),
-            'num_heteroatoms': rdMolDescriptors.CalcNumHeteroatoms(mol),
-            
-            # Additional descriptors
-            'num_atoms': mol.GetNumAtoms(),
+            'num_rings': num_rings,
+            'num_aromatic_rings': num_aromatic_rings,
             'num_heavy_atoms': mol.GetNumHeavyAtoms(),
-            'num_bonds': mol.GetNumBonds(),
-            'fraction_sp3': rdMolDescriptors.CalcFractionCSP3(mol),
-            
-            # Complexity
-            'num_stereo_centers': len(Chem.FindMolChiralCenters(mol, includeUnassigned=True)),
+            'fraction_sp3': fraction_sp3,
+            'qed': qed_score,
         }
-        
-        return properties
+    except Exception:
+        return None
+
+
+def calculate_qed(mol_or_smiles) -> float:
+    """
+    Calculate Quantitative Estimate of Drug-likeness (QED).
+
+    Args:
+        mol_or_smiles: RDKit Mol or SMILES string
+
+    Returns:
+        QED score (0.0-1.0), 0.0 if invalid
+    """
+    try:
+        if isinstance(mol_or_smiles, str):
+            mol = Chem.MolFromSmiles(mol_or_smiles)
+        else:
+            mol = mol_or_smiles
+
+        if mol is None:
+            return 0.0
+
+        return QEDModule.qed(mol)
+    except Exception:
+        return 0.0
+
+
+def get_murcko_scaffold(smiles: str) -> Optional[str]:
+    """
+    Get the Murcko scaffold (generic framework) of a molecule.
+
+    Args:
+        smiles: SMILES string
+
+    Returns:
+        Canonical SMILES of the generic Murcko scaffold, or None
+    """
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+        scaffold = MurckoScaffold.GetScaffoldForMol(mol)
+        generic = MurckoScaffold.MakeScaffoldGeneric(scaffold)
+        return Chem.MolToSmiles(generic, canonical=True)
     except Exception:
         return None
 
 
 def canonicalize_smiles(smiles: str) -> Optional[str]:
     """
-    Convert SMILES to canonical form.
-    
+    Canonicalize a SMILES string.
+
     Args:
-        smiles: Input SMILES string
-        
+        smiles: Input SMILES
+
     Returns:
         Canonical SMILES or None if invalid
     """
@@ -183,59 +224,74 @@ def canonicalize_smiles(smiles: str) -> Optional[str]:
 
 def get_morgan_fingerprint(mol_or_smiles, radius: int = 2, n_bits: int = 2048):
     """
-    Generate Morgan fingerprint for a molecule.
-    
+    Get Morgan (circular) fingerprint.
+
     Args:
-        mol_or_smiles: RDKit molecule or SMILES string
+        mol_or_smiles: RDKit Mol or SMILES
         radius: Fingerprint radius
-        n_bits: Number of bits in fingerprint
-        
+        n_bits: Number of bits
+
     Returns:
-        Numpy array of fingerprint bits or None
+        RDKit fingerprint object or None
     """
-    import numpy as np
-    
-    if isinstance(mol_or_smiles, str):
-        mol = Chem.MolFromSmiles(mol_or_smiles)
-    else:
-        mol = mol_or_smiles
-    
-    if mol is None:
-        return None
-    
     try:
-        fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=n_bits)
-        return np.array(fp)
+        if isinstance(mol_or_smiles, str):
+            mol = Chem.MolFromSmiles(mol_or_smiles)
+        else:
+            mol = mol_or_smiles
+
+        if mol is None:
+            return None
+
+        return AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=n_bits)
     except Exception:
         return None
 
 
-def calculate_tanimoto_similarity(mol1, mol2, radius: int = 2) -> float:
+def calculate_tanimoto_similarity(smiles1: str, smiles2: str) -> float:
     """
     Calculate Tanimoto similarity between two molecules.
-    
+
     Args:
-        mol1: First molecule (SMILES or mol object)
-        mol2: Second molecule (SMILES or mol object)
-        radius: Morgan fingerprint radius
-        
+        smiles1: First molecule SMILES
+        smiles2: Second molecule SMILES
+
     Returns:
-        Tanimoto similarity (0-1)
+        Tanimoto similarity (0.0-1.0)
     """
-    from rdkit import DataStructs
-    
-    # Convert to mol objects if needed
-    if isinstance(mol1, str):
-        mol1 = Chem.MolFromSmiles(mol1)
-    if isinstance(mol2, str):
-        mol2 = Chem.MolFromSmiles(mol2)
-    
-    if mol1 is None or mol2 is None:
-        return 0.0
-    
     try:
-        fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, radius)
-        fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, radius)
+        fp1 = get_morgan_fingerprint(smiles1)
+        fp2 = get_morgan_fingerprint(smiles2)
+
+        if fp1 is None or fp2 is None:
+            return 0.0
+
         return DataStructs.TanimotoSimilarity(fp1, fp2)
     except Exception:
         return 0.0
+
+
+def calculate_tanimoto_batch(smiles: str, reference_smiles: List[str]) -> List[float]:
+    """
+    Calculate Tanimoto similarity of a molecule against a list of references.
+
+    Args:
+        smiles: Query molecule SMILES
+        reference_smiles: List of reference SMILES
+
+    Returns:
+        List of Tanimoto similarities
+    """
+    fp = get_morgan_fingerprint(smiles)
+    if fp is None:
+        return [0.0] * len(reference_smiles)
+
+    sims = []
+    for ref in reference_smiles:
+        ref_fp = get_morgan_fingerprint(ref)
+        if ref_fp is not None:
+            sims.append(DataStructs.TanimotoSimilarity(fp, ref_fp))
+        else:
+            sims.append(0.0)
+
+    return sims

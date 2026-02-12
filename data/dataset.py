@@ -19,16 +19,51 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 from utils.filters import is_drug_like, is_glue_like
+from utils.chemistry import get_molecular_properties
+from config import PROPERTY_NAMES
+
+
+def _extract_property_tensor(smiles: str) -> Optional[torch.Tensor]:
+    """
+    Compute property annotations for conditioning.
+
+    Returns:
+        Tensor of shape [num_properties] with normalized property values,
+        or None if properties can't be computed.
+    """
+    props = get_molecular_properties(smiles)
+    if props is None:
+        return None
+
+    # SA score helper
+    from utils.filters import calculate_sa_score
+    sa = calculate_sa_score(smiles)
+    if sa is None:
+        sa = 3.0  # default
+
+    # Build tensor in PROPERTY_NAMES order
+    values = [
+        props.get('molecular_weight', 300.0) / 500.0,  # normalize to ~[0, 1]
+        (props.get('logp', 2.0) + 2.0) / 8.0,          # shift & scale
+        props.get('num_aromatic_rings', 1) / 5.0,
+        props.get('hbd', 1) / 5.0,
+        props.get('hba', 3) / 10.0,
+        props.get('fraction_sp3', 0.3),                 # already [0, 1]
+        props.get('tpsa', 60.0) / 140.0,
+        sa / 10.0,
+    ]
+    return torch.tensor(values, dtype=torch.float32)
 
 
 class MolecularGlueDataset(Dataset):
     """
     PyTorch Dataset for molecular glue-like molecules.
-    
+
     Loads molecules from CSV/SMILES files, converts to graphs,
     and filters by drug-likeness and glue-like properties.
+    Each graph item includes a `properties` tensor for conditioning.
     """
-    
+
     def __init__(
         self,
         data_path: str,
@@ -59,20 +94,20 @@ class MolecularGlueDataset(Dataset):
         self.cache_graphs = cache_graphs
         self.max_atoms = max_atoms
         self.verbose = verbose
-        
+
         # Load and filter SMILES
         self.smiles_list = self._load_smiles()
-        
+
         # Cache for converted graphs
         self._graph_cache = {}
-        
+
         if verbose:
             print(f"Loaded {len(self.smiles_list)} molecules from {data_path}")
-    
+
     def _load_smiles(self) -> List[str]:
         """Load SMILES from file(s) and apply filters."""
         smiles_list = []
-        
+
         if os.path.isfile(self.data_path):
             if self.data_path.endswith('.csv'):
                 df = pd.read_csv(self.data_path)
@@ -90,39 +125,44 @@ class MolecularGlueDataset(Dataset):
                 elif filename.endswith('.smi') or filename.endswith('.txt'):
                     with open(filepath, 'r') as f:
                         smiles_list.extend([line.strip().split()[0] for line in f if line.strip()])
-        
+
         # Filter molecules
         filtered_smiles = []
         iterator = tqdm(smiles_list, desc="Filtering molecules") if self.verbose else smiles_list
-        
+
         for smiles in iterator:
             # Convert to graph to check validity and size
             graph = smiles_to_graph(smiles)
             if graph is None:
                 continue
-            
+
             if graph.x.shape[0] > self.max_atoms:
                 continue
-            
+
             # Drug-likeness filter
             if self.filter_drug_like and not is_drug_like(smiles):
                 continue
-            
+
             # Glue-like filter (optional, more restrictive)
             if self.filter_glue_like and not is_glue_like(smiles):
                 continue
-            
+
+            # Compute property annotations for conditioning
+            prop_tensor = _extract_property_tensor(smiles)
+            if prop_tensor is not None:
+                graph.properties = prop_tensor
+
             filtered_smiles.append(smiles)
-            
+
             # Cache the graph if enabled
             if self.cache_graphs:
                 self._graph_cache[len(filtered_smiles) - 1] = graph
-        
+
         return filtered_smiles
-    
+
     def __len__(self) -> int:
         return len(self.smiles_list)
-    
+
     def __getitem__(self, idx: int) -> Data:
         """Get graph for molecule at index."""
         # Check cache first
@@ -134,26 +174,35 @@ class MolecularGlueDataset(Dataset):
             if graph is None:
                 # Return a dummy graph if conversion fails
                 graph = Data(
-                    x=torch.zeros((1, 17)),  # Minimal node features
+                    x=torch.zeros((1, 23)),  # Updated node feature dim
                     edge_index=torch.zeros((2, 0), dtype=torch.long),
-                    edge_attr=torch.zeros((0, 7)),
+                    edge_attr=torch.zeros((0, 8)),  # Updated edge feature dim
+                    properties=torch.zeros(len(PROPERTY_NAMES)),
                 )
+            else:
+                # Compute properties if not cached
+                prop_tensor = _extract_property_tensor(smiles)
+                if prop_tensor is not None:
+                    graph.properties = prop_tensor
+                else:
+                    graph.properties = torch.zeros(len(PROPERTY_NAMES))
+
             if self.cache_graphs:
                 self._graph_cache[idx] = graph
-        
+
         if self.transform:
             graph = self.transform(graph)
-        
+
         return graph
-    
+
     def get_smiles(self, idx: int) -> str:
         """Get SMILES string at index."""
         return self.smiles_list[idx]
-    
+
     def get_all_smiles(self) -> List[str]:
         """Get all SMILES strings."""
         return self.smiles_list.copy()
-    
+
     @staticmethod
     def collate_fn(batch: List[Data]):
         """Custom collate function for batching graphs."""
@@ -168,26 +217,26 @@ def create_train_val_split(
 ) -> tuple:
     """
     Split dataset into train and validation sets.
-    
+
     Args:
         dataset: MolecularGlueDataset instance
         val_ratio: Fraction of data for validation
         seed: Random seed
-        
+
     Returns:
         Tuple of (train_dataset, val_dataset)
     """
     from torch.utils.data import Subset
     import numpy as np
-    
+
     np.random.seed(seed)
     indices = np.random.permutation(len(dataset))
-    
+
     val_size = int(len(dataset) * val_ratio)
     val_indices = indices[:val_size]
     train_indices = indices[val_size:]
-    
+
     train_dataset = Subset(dataset, train_indices.tolist())
     val_dataset = Subset(dataset, val_indices.tolist())
-    
+
     return train_dataset, val_dataset

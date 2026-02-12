@@ -1,12 +1,12 @@
 """
-Post-processing utilities for generated molecules.
+Post-processing for generated molecules.
 """
-from typing import List, Set, Optional, Tuple
-import torch
-from torch_geometric.data import Data
+from typing import List, Optional, Set
+import os
+import csv
+from rdkit import Chem
 
 import sys
-import os
 
 # Add project root to path for imports
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,157 +14,145 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from data.molecular_graph import graph_to_smiles
-from utils.chemistry import is_valid_molecule, canonicalize_smiles
-from utils.filters import is_drug_like, is_glue_like, passes_pains_filter, is_synthetically_accessible
+from utils.chemistry import (
+    is_valid_molecule, canonicalize_smiles, get_molecular_properties,
+)
+from utils.filters import (
+    is_drug_like, is_glue_like, passes_pains_filter,
+    is_synthetically_accessible, has_reactive_groups,
+)
 
 
-def postprocess_molecule(graph: Data) -> Optional[str]:
+def postprocess_molecule(graph) -> Optional[str]:
     """
     Convert generated graph to valid SMILES.
-    
+
     Args:
-        graph: Generated molecular graph
-        
+        graph: PyG Data object
+
     Returns:
-        Canonical SMILES or None if invalid
+        Canonical SMILES string or None
     """
-    # Convert graph to SMILES
     smiles = graph_to_smiles(graph)
-    
     if smiles is None:
         return None
-    
-    # Validate and canonicalize
-    if not is_valid_molecule(smiles):
-        return None
-    
+
     canonical = canonicalize_smiles(smiles)
+    if canonical is None:
+        return None
+
+    if not is_valid_molecule(canonical):
+        return None
+
     return canonical
 
 
 def filter_generated(
-    molecules: List[Data],
-    apply_drug_like: bool = True,
-    apply_glue_like: bool = False,
-    apply_pains: bool = True,
-    apply_sa_filter: bool = True,
-    verbose: bool = True,
-) -> Tuple[List[str], dict]:
+    smiles_list: List[str],
+    drug_like: bool = True,
+    glue_like: bool = True,
+    pains: bool = True,
+    sa_accessible: bool = True,
+    no_reactive: bool = True,
+    max_heavy_atoms: int = 35,
+    min_aromatic_rings: int = 1,
+    min_hbd_hba: int = 2,
+    min_fsp3: float = 0.2,
+) -> List[str]:
     """
-    Filter generated molecules by chemical validity and properties.
-    
+    Filter generated molecules by multiple criteria.
+
     Args:
-        molecules: List of generated molecular graphs
-        apply_drug_like: Filter by Lipinski's rules
-        apply_glue_like: Filter by glue-like properties
-        apply_pains: Filter out PAINS patterns
-        apply_sa_filter: Filter by synthetic accessibility
-        verbose: Print statistics
-        
+        smiles_list: List of SMILES strings
+        drug_like: Apply Lipinski's Rule of Five
+        glue_like: Apply glue-likeness criteria
+        pains: Apply PAINS filter
+        sa_accessible: Check synthetic accessibility
+        no_reactive: Reject molecules with reactive groups
+        max_heavy_atoms: Maximum heavy atom count
+        min_aromatic_rings: Minimum aromatic ring count
+        min_hbd_hba: Minimum HBD + HBA
+        min_fsp3: Minimum fraction sp3 carbons
+
     Returns:
-        Tuple of (valid SMILES list, statistics dict)
+        Filtered list of SMILES
     """
-    stats = {
-        'total_generated': len(molecules),
-        'valid_smiles': 0,
-        'drug_like': 0,
-        'glue_like': 0,
-        'pains_pass': 0,
-        'sa_pass': 0,
-        'final_count': 0,
-    }
-    
-    valid_smiles = []
-    
-    for graph in molecules:
-        # Convert to SMILES
-        smiles = postprocess_molecule(graph)
-        if smiles is None:
+    filtered = []
+
+    for smiles in smiles_list:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
             continue
-        
-        stats['valid_smiles'] += 1
-        
-        # Apply filters
-        passes = True
-        
-        if apply_drug_like:
-            if is_drug_like(smiles):
-                stats['drug_like'] += 1
-            else:
-                passes = False
-        
-        if passes and apply_glue_like:
-            if is_glue_like(smiles):
-                stats['glue_like'] += 1
-            else:
-                passes = False
-        
-        if passes and apply_pains:
-            if passes_pains_filter(smiles):
-                stats['pains_pass'] += 1
-            else:
-                passes = False
-        
-        if passes and apply_sa_filter:
-            if is_synthetically_accessible(smiles):
-                stats['sa_pass'] += 1
-            else:
-                passes = False
-        
-        if passes:
-            valid_smiles.append(smiles)
-    
-    stats['final_count'] = len(valid_smiles)
-    
-    if verbose:
-        print(f"Generated: {stats['total_generated']}")
-        print(f"Valid SMILES: {stats['valid_smiles']} ({100*stats['valid_smiles']/max(1,stats['total_generated']):.1f}%)")
-        print(f"Final (after filters): {stats['final_count']} ({100*stats['final_count']/max(1,stats['total_generated']):.1f}%)")
-    
-    return valid_smiles, stats
+
+        # Heavy atom check
+        if mol.GetNumHeavyAtoms() > max_heavy_atoms:
+            continue
+
+        # Aromatic ring check
+        from rdkit.Chem import Descriptors
+        if Descriptors.NumAromaticRings(mol) < min_aromatic_rings:
+            continue
+
+        # HBD + HBA check
+        from rdkit.Chem import rdMolDescriptors
+        hbd = rdMolDescriptors.CalcNumHBD(mol)
+        hba = rdMolDescriptors.CalcNumHBA(mol)
+        if (hbd + hba) < min_hbd_hba:
+            continue
+
+        # Fsp3 check
+        props = get_molecular_properties(smiles)
+        if props and props.get('fraction_sp3', 0) < min_fsp3:
+            continue
+
+        # Standard filters
+        if drug_like and not is_drug_like(mol):
+            continue
+        if glue_like and not is_glue_like(mol):
+            continue
+        if pains and not passes_pains_filter(mol):
+            continue
+        if sa_accessible and not is_synthetically_accessible(mol):
+            continue
+        if no_reactive and has_reactive_groups(mol):
+            continue
+
+        filtered.append(smiles)
+
+    return filtered
 
 
 def deduplicate(
     smiles_list: List[str],
-    training_smiles: Optional[Set[str]] = None,
-    verbose: bool = True,
-) -> Tuple[List[str], dict]:
+    training_smiles: Optional[List[str]] = None,
+) -> List[str]:
     """
-    Remove duplicates and optionally filter out training set molecules.
-    
+    Remove duplicate molecules and optionally training set molecules.
+
     Args:
-        smiles_list: List of generated SMILES
-        training_smiles: Set of training SMILES (for novelty check)
-        verbose: Print statistics
-        
+        smiles_list: Generated SMILES
+        training_smiles: Training set SMILES to exclude
+
     Returns:
-        Tuple of (unique novel SMILES, statistics)
+        Deduplicated list
     """
-    stats = {
-        'input_count': len(smiles_list),
-        'unique_count': 0,
-        'novel_count': 0,
-    }
-    
-    # Remove duplicates
-    unique_smiles = list(set(smiles_list))
-    stats['unique_count'] = len(unique_smiles)
-    
-    # Remove training set molecules
+    seen: Set[str] = set()
+
+    # Add training set
     if training_smiles:
-        novel_smiles = [s for s in unique_smiles if s not in training_smiles]
-        stats['novel_count'] = len(novel_smiles)
-    else:
-        novel_smiles = unique_smiles
-        stats['novel_count'] = len(novel_smiles)
-    
-    if verbose:
-        print(f"Input: {stats['input_count']}")
-        print(f"Unique: {stats['unique_count']} ({100*stats['unique_count']/max(1,stats['input_count']):.1f}%)")
-        if training_smiles:
-            print(f"Novel: {stats['novel_count']} ({100*stats['novel_count']/max(1,stats['unique_count']):.1f}%)")
-    
-    return novel_smiles, stats
+        for s in training_smiles:
+            c = canonicalize_smiles(s)
+            if c:
+                seen.add(c)
+
+    unique = []
+    for smiles in smiles_list:
+        canonical = canonicalize_smiles(smiles)
+        if canonical and canonical not in seen:
+            seen.add(canonical)
+            unique.append(canonical)
+
+    return unique
 
 
 def save_molecules(
@@ -173,27 +161,84 @@ def save_molecules(
     include_properties: bool = True,
 ):
     """
-    Save generated molecules to CSV file.
-    
+    Save molecules to CSV file with properties.
+
     Args:
-        smiles_list: List of SMILES strings
-        output_path: Output file path
-        include_properties: Include computed properties
+        smiles_list: List of SMILES
+        output_path: Path to output CSV
+        include_properties: Include calculated properties
     """
-    import pandas as pd
-    from utils.chemistry import get_molecular_properties
-    
-    data = []
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+
+    headers = ['smiles']
+    if include_properties:
+        headers.extend([
+            'molecular_weight', 'logp', 'hbd', 'hba', 'tpsa',
+            'rotatable_bonds', 'num_rings', 'num_aromatic_rings',
+            'num_heavy_atoms', 'fraction_sp3', 'qed',
+        ])
+
+    with open(output_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+
+        for smiles in smiles_list:
+            row = [smiles]
+            if include_properties:
+                props = get_molecular_properties(smiles)
+                if props:
+                    row.extend([
+                        f"{props.get('molecular_weight', 0):.2f}",
+                        f"{props.get('logp', 0):.2f}",
+                        props.get('hbd', 0),
+                        props.get('hba', 0),
+                        f"{props.get('tpsa', 0):.2f}",
+                        props.get('rotatable_bonds', 0),
+                        props.get('num_rings', 0),
+                        props.get('num_aromatic_rings', 0),
+                        props.get('num_heavy_atoms', 0),
+                        f"{props.get('fraction_sp3', 0):.3f}",
+                        f"{props.get('qed', 0):.3f}",
+                    ])
+                else:
+                    row.extend([''] * 11)
+            writer.writerow(row)
+
+    print(f"Saved {len(smiles_list)} molecules to {output_path}")
+
+
+def save_molecules_sdf(
+    smiles_list: List[str],
+    output_path: str,
+):
+    """
+    Save molecules to SDF format.
+
+    Args:
+        smiles_list: List of SMILES
+        output_path: Path to output SDF file
+    """
+    from rdkit.Chem import AllChem
+
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+
+    writer = Chem.SDWriter(output_path)
+
     for smiles in smiles_list:
-        row = {'smiles': smiles}
-        
-        if include_properties:
-            props = get_molecular_properties(smiles)
-            if props:
-                row.update(props)
-        
-        data.append(row)
-    
-    df = pd.DataFrame(data)
-    df.to_csv(output_path, index=False)
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            continue
+
+        # Add 2D coordinates
+        AllChem.Compute2DCoords(mol)
+
+        # Add properties
+        props = get_molecular_properties(smiles)
+        if props:
+            for key, value in props.items():
+                mol.SetProp(key, str(value))
+
+        writer.write(mol)
+
+    writer.close()
     print(f"Saved {len(smiles_list)} molecules to {output_path}")
