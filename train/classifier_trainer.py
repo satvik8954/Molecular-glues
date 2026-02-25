@@ -1,16 +1,25 @@
 # train/classifier_trainer.py
+"""
+Training pipeline for molecular glue classifier.
+Similar to diffusion trainer but simpler: BCEWithLogitsLoss, standard metrics.
+"""
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-import wandb
 from tqdm import tqdm
+import os
+
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
 
 class ClassifierTrainer:
-    """
-    Training pipeline for molecular glue classifier.
-    """
+    """Training pipeline for molecular glue classifier."""
     
     def __init__(self, model, train_dataset, val_dataset, config):
         self.model = model
@@ -59,9 +68,18 @@ class ClassifierTrainer:
         self.best_val_acc = 0.0
         self.epoch = 0
         
+        # Create checkpoint directory
+        os.makedirs(config.checkpoint_dir, exist_ok=True)
+        
         # Logging
-        if config.use_wandb:
-            wandb.init(project='molecular-glue-classifier', config=vars(config))
+        if config.use_wandb and HAS_WANDB:
+            wandb.init(
+                project=getattr(config, 'project_name', 'molecular-glue-classifier'),
+                config=vars(config) if hasattr(config, '__dict__') else {}
+            )
+            self.use_wandb = True
+        else:
+            self.use_wandb = False
     
     def train_epoch(self):
         """Train for one epoch."""
@@ -132,13 +150,29 @@ class ClassifierTrainer:
                 all_probs.extend(probs)
                 all_labels.extend(batch.y.cpu().numpy())
         
-        # Compute metrics
+        # Compute metrics (with safety for edge cases)
         avg_loss = total_loss / len(self.val_loader)
         accuracy = accuracy_score(all_labels, all_preds)
-        precision = precision_score(all_labels, all_preds)
-        recall = recall_score(all_labels, all_preds)
-        f1 = f1_score(all_labels, all_preds)
-        auc = roc_auc_score(all_labels, all_probs)
+        
+        try:
+            precision = precision_score(all_labels, all_preds, zero_division=0)
+        except Exception:
+            precision = 0.0
+        
+        try:
+            recall = recall_score(all_labels, all_preds, zero_division=0)
+        except Exception:
+            recall = 0.0
+        
+        try:
+            f1 = f1_score(all_labels, all_preds, zero_division=0)
+        except Exception:
+            f1 = 0.0
+        
+        try:
+            auc = roc_auc_score(all_labels, all_probs)
+        except Exception:
+            auc = 0.0  # Fails if only one class in batch
         
         return {
             'loss': avg_loss,
@@ -175,7 +209,7 @@ class ClassifierTrainer:
             print(f"          F1: {val_metrics['f1']:.4f}, AUC: {val_metrics['auc']:.4f}")
             
             # Log to wandb
-            if self.config.use_wandb:
+            if self.use_wandb:
                 wandb.log({
                     'train/loss': train_metrics['loss'],
                     'train/accuracy': train_metrics['accuracy'],
@@ -203,6 +237,7 @@ class ClassifierTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_acc': self.best_val_acc,
-            'config': self.config
         }
-        torch.save(checkpoint, f'checkpoints/{filename}')
+        path = os.path.join(self.config.checkpoint_dir, filename)
+        torch.save(checkpoint, path)
+        print(f"  Checkpoint saved to {path}")

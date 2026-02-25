@@ -16,14 +16,16 @@ class ClassifierConfig:
     batch_size: int = 32
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
-    num_epochs: int = 100
+    num_epochs: int = 50
     
     # Data
     num_workers: int = 4
+    val_split: float = 0.2
+    data_path: str = 'data/classifier_dataset.csv'
     
     # Logging
-    use_wandb: bool = True
+    use_wandb: bool = False
+    project_name: str = 'molecular-glue-classifier'
     
     # Paths
-    data_path: str = 'data/classifier_dataset_augmented.csv'
-    checkpoint_dir: str = 'checkpoints'
+    checkpoint_dir: str = 'checkpoints/classifier'
