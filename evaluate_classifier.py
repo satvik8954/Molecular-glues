@@ -1,0 +1,98 @@
+# evaluate_classifier.py
+
+import torch
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
+
+def evaluate_model(model_path, test_dataset):
+    """
+    Comprehensive evaluation of trained classifier.
+    """
+    # Load model
+    checkpoint = torch.load(model_path)
+    model = MolecularGlueClassifier(**checkpoint['config'])
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    model.to('cuda')
+    
+    # Predictions
+    all_preds = []
+    all_probs = []
+    all_labels = []
+    all_smiles = []
+    
+    test_loader = DataLoader(test_dataset, batch_size=32, 
+                             collate_fn=test_dataset.collate_fn)
+    
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = batch.to('cuda')
+            logits = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+            probs = torch.sigmoid(logits).cpu().numpy()
+            
+            all_probs.extend(probs)
+            all_preds.extend(probs > 0.5)
+            all_labels.extend(batch.y.cpu().numpy())
+            all_smiles.extend(batch.smiles)
+    
+    # 1. Confusion Matrix
+    cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.savefig('confusion_matrix.png', dpi=300, bbox_inches='tight')
+    print("✓ Confusion matrix saved")
+    
+    # 2. ROC Curve
+    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+    roc_auc = auc(fpr, tpr)
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, label=f'ROC Curve (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], 'k--', label='Random')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend()
+    plt.savefig('roc_curve.png', dpi=300, bbox_inches='tight')
+    print("✓ ROC curve saved")
+    
+    # 3. Classification Report
+    print("\nClassification Report:")
+    print(classification_report(all_labels, all_preds, 
+                                target_names=['Non-Glue', 'Glue']))
+    
+    # 4. Error Analysis
+    errors = pd.DataFrame({
+        'SMILES': all_smiles,
+        'True': all_labels,
+        'Pred': all_preds,
+        'Prob': all_probs
+    })
+    errors['Error'] = errors['True'] != errors['Pred']
+    
+    print(f"\nError Analysis:")
+    print(f"  False Positives: {((errors['True']==0) & (errors['Pred']==1)).sum()}")
+    print(f"  False Negatives: {((errors['True']==1) & (errors['Pred']==0)).sum()}")
+    
+    # Save error cases
+    error_cases = errors[errors['Error']]
+    error_cases.to_csv('error_cases.csv', index=False)
+    print(f"✓ Error cases saved ({len(error_cases)} total)")
+    
+    return errors
+
+
+if __name__ == '__main__':
+    # Load test dataset
+    test_dataset = MolecularGlueClassifierDataset(
+        csv_file='data/classifier_dataset_augmented.csv',
+        split='val'
+    )
+    
+    # Evaluate
+    results = evaluate_model('checkpoints/best_classifier.pt', test_dataset)

@@ -158,7 +158,7 @@ class MolecularDiffusion(nn.Module):
 
         # === Primary Loss: Cross-entropy on predictions ===
         node_loss = F.cross_entropy(
-            predictions['node_logits'],
+            predictions['node_logits'][:, :self.num_atom_types],
             node_types_orig.long()
         )
         charge_loss = F.cross_entropy(
@@ -166,7 +166,7 @@ class MolecularDiffusion(nn.Module):
             charges_orig.long()
         )
         edge_loss = F.cross_entropy(
-            predictions['edge_logits'],
+            predictions['edge_logits'][:, :self.num_bond_types],
             edge_types_orig.long()
         )
 
@@ -175,7 +175,7 @@ class MolecularDiffusion(nn.Module):
         # === Auxiliary Loss 1: Valency loss ===
         valency_loss = self._compute_valency_loss(
             predictions['node_logits'],
-            predictions['edge_logits'],
+            predictions['edge_logits'][:, :self.num_bond_types],
             batch.edge_index,
             batch.batch,
         )
@@ -197,8 +197,8 @@ class MolecularDiffusion(nn.Module):
 
         # Compute accuracy metrics
         with torch.no_grad():
-            node_acc = (predictions['node_logits'].argmax(dim=-1) == node_types_orig).float().mean()
-            edge_acc = (predictions['edge_logits'].argmax(dim=-1) == edge_types_orig).float().mean()
+            node_acc = (predictions['node_logits'][:, :self.num_atom_types].argmax(dim=-1) == node_types_orig).float().mean()
+            edge_acc = (predictions['edge_logits'][:, :self.num_bond_types].argmax(dim=-1) == edge_types_orig).float().mean()
 
         return {
             'loss': total_loss,
@@ -444,8 +444,8 @@ class MolecularDiffusion(nn.Module):
 
                 if t > 0:
                     # Sample from predicted distribution with temperature
-                    node_probs = F.softmax(predictions['node_logits'] / temperature, dim=-1)
-                    edge_probs = F.softmax(predictions['edge_logits'] / temperature, dim=-1)
+                    node_probs = F.softmax(predictions['node_logits'][:, :self.num_atom_types] / temperature, dim=-1)
+                    edge_probs = F.softmax(predictions['edge_logits'][:, :self.num_bond_types] / temperature, dim=-1)
                     charge_probs = F.softmax(predictions['charge_logits'] / temperature, dim=-1)
 
                     node_types = torch.multinomial(node_probs, 1).squeeze(-1)
@@ -453,8 +453,8 @@ class MolecularDiffusion(nn.Module):
                     charges = torch.multinomial(charge_probs, 1).squeeze(-1)
                 else:
                     # Final step: take argmax
-                    node_types = predictions['node_logits'].argmax(dim=-1)
-                    edge_types = predictions['edge_logits'].argmax(dim=-1)
+                    node_types = predictions['node_logits'][:, :self.num_atom_types].argmax(dim=-1)
+                    edge_types = predictions['edge_logits'][:, :self.num_bond_types].argmax(dim=-1)
                     charges = predictions['charge_logits'].argmax(dim=-1)
 
             # Create output graph

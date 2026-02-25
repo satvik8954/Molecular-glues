@@ -132,7 +132,7 @@ class GraphAttentionLayer(MessagePassing):
         self.W_o = nn.Linear(hidden_dim, hidden_dim)
         
         # Edge feature update (NEW)
-        self.edge_update = nn.Sequential(
+        self.edge_update_mlp = nn.Sequential(
             nn.Linear(hidden_dim * 2 + self.edge_dim, self.edge_dim),
             nn.GELU(),
             nn.Linear(self.edge_dim, self.edge_dim)
@@ -167,7 +167,7 @@ class GraphAttentionLayer(MessagePassing):
         # Update edge features (NEW)
         src, dst = edge_index
         edge_input = torch.cat([x[src], x[dst], edge_attr], dim=-1)
-        edge_attr_out = edge_attr + self.edge_update(edge_input)  # Residual
+        edge_attr_out = edge_attr + self.edge_update_mlp(edge_input)  # Residual
         
         return x_out, edge_attr_out
 
