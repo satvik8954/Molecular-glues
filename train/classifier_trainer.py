@@ -26,15 +26,25 @@ class ClassifierTrainer:
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
+        # Enable cuDNN auto-tuner for faster convolutions on GPU
+        if self.device.type == 'cuda':
+            torch.backends.cudnn.benchmark = True
+        
         self.model.to(self.device)
         
-        # Data loaders
+        # Mixed precision scaler for GPU speedup (~2x faster on modern GPUs)
+        self.use_amp = self.device.type == 'cuda'
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
+        
+        # Data loaders (pin_memory for faster CPU->GPU transfer)
+        use_pin = self.device.type == 'cuda'
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=config.batch_size,
             shuffle=True,
             collate_fn=train_dataset.collate_fn,
-            num_workers=config.num_workers
+            num_workers=config.num_workers,
+            pin_memory=use_pin
         )
         
         self.val_loader = DataLoader(
@@ -42,7 +52,8 @@ class ClassifierTrainer:
             batch_size=config.batch_size,
             shuffle=False,
             collate_fn=val_dataset.collate_fn,
-            num_workers=config.num_workers
+            num_workers=config.num_workers,
+            pin_memory=use_pin
         )
         
         # Optimizer
@@ -93,17 +104,18 @@ class ClassifierTrainer:
         for batch in pbar:
             batch = batch.to(self.device)
             
-            # Forward pass
-            logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch).squeeze(-1)
+            # Forward pass with mixed precision
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch).squeeze(-1)
+                loss = self.criterion(logits, batch.y)
             
-            # Compute loss
-            loss = self.criterion(logits, batch.y)
-            
-            # Backward pass
+            # Backward pass with gradient scaling
             self.optimizer.zero_grad()
-            loss.backward()
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             
             # Track metrics
             total_loss += loss.item()

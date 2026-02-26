@@ -13,13 +13,13 @@ class ClassifierConfig:
     dropout: float = 0.1
     
     # Training
-    batch_size: int = 32
+    batch_size: int = 64  # Use 64-128 on GPU, 32 on CPU
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
     num_epochs: int = 50
     
     # Data
-    num_workers: int = 0  # 0 for Windows compatibility; set to 4 on Linux/Mac
+    num_workers: int = 4  # Set to 0 on Windows, 4+ on Linux/DGX
     val_split: float = 0.2
     data_path: str = 'data/classifier_dataset.csv'
     
