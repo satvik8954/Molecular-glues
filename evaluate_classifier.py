@@ -4,18 +4,24 @@ import torch
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, matthews_corrcoef
+from scipy.stats import spearmanr, pearsonr
+from torch_geometric.loader import DataLoader
+from model.classifier import MolecularGlueClassifier
+from data.classifier_dataset import MolecularGlueClassifierDataset
 
 def evaluate_model(model_path, test_dataset):
     """
     Comprehensive evaluation of trained classifier.
     """
     # Load model
-    checkpoint = torch.load(model_path)
-    model = MolecularGlueClassifier(**checkpoint['config'])
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    checkpoint = torch.load(model_path, map_location=device)
+    config = checkpoint.get('config', {})
+    model = MolecularGlueClassifier(**config)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    model.to('cuda')
+    model.to(device)
     
     # Predictions
     all_preds = []
@@ -28,8 +34,8 @@ def evaluate_model(model_path, test_dataset):
     
     with torch.no_grad():
         for batch in test_loader:
-            batch = batch.to('cuda')
-            logits = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+            batch = batch.to(device)
+            logits = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch).squeeze(-1)
             probs = torch.sigmoid(logits).cpu().numpy()
             
             all_probs.extend(probs)
@@ -66,7 +72,22 @@ def evaluate_model(model_path, test_dataset):
     print(classification_report(all_labels, all_preds, 
                                 target_names=['Non-Glue', 'Glue']))
     
-    # 4. Error Analysis
+    # 4. MCC, SPCC, PCC
+    import numpy as np
+    labels_arr = np.array(all_labels)
+    probs_arr = np.array(all_probs)
+    preds_arr = np.array(all_preds).astype(float)
+    
+    mcc = matthews_corrcoef(labels_arr, preds_arr)
+    spcc, spcc_pval = spearmanr(labels_arr, probs_arr)
+    pcc, pcc_pval = pearsonr(labels_arr, probs_arr)
+    
+    print(f"Correlation Metrics:")
+    print(f"  MCC  (Matthews Correlation Coefficient): {mcc:.4f}")
+    print(f"  SPCC (Spearman Rank Correlation):        {spcc:.4f}  (p={spcc_pval:.2e})")
+    print(f"  PCC  (Pearson Correlation):              {pcc:.4f}  (p={pcc_pval:.2e})")
+    
+    # 5. Error Analysis
     errors = pd.DataFrame({
         'SMILES': all_smiles,
         'True': all_labels,
@@ -90,9 +111,9 @@ def evaluate_model(model_path, test_dataset):
 if __name__ == '__main__':
     # Load test dataset
     test_dataset = MolecularGlueClassifierDataset(
-        csv_file='data/classifier_dataset_augmented.csv',
+        csv_file='data/classifier_dataset.csv',
         split='val'
     )
     
     # Evaluate
-    results = evaluate_model('checkpoints/best_classifier.pt', test_dataset)
+    results = evaluate_model('checkpoints/classifier/best_classifier.pt', test_dataset)

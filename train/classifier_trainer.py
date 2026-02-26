@@ -57,8 +57,7 @@ class ClassifierTrainer:
             self.optimizer,
             mode='max',
             factor=0.5,
-            patience=5,
-            verbose=True
+            patience=5
         )
         
         # Loss function (Binary Cross-Entropy)
@@ -95,7 +94,7 @@ class ClassifierTrainer:
             batch = batch.to(self.device)
             
             # Forward pass
-            logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+            logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch).squeeze(-1)
             
             # Compute loss
             loss = self.criterion(logits, batch.y)
@@ -136,7 +135,7 @@ class ClassifierTrainer:
                 batch = batch.to(self.device)
                 
                 # Forward pass
-                logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+                logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch).squeeze(-1)
                 
                 # Compute loss
                 loss = self.criterion(logits, batch.y)
@@ -237,6 +236,12 @@ class ClassifierTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_acc': self.best_val_acc,
+            'config': {
+                'hidden_dim': self.model.hidden_dim,
+                'num_layers': len(self.model.layers),
+                'num_heads': self.model.layers[0].local_attn.num_heads,
+                'dropout': self.config.dropout,
+            },
         }
         path = os.path.join(self.config.checkpoint_dir, filename)
         torch.save(checkpoint, path)

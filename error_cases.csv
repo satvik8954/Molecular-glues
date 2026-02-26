@@ -1,0 +1,11 @@
+SMILES,True,Pred,Prob,Error
+COc1cc(-c2ccccc2)nc2ccccc12,0.0,True,0.6813233,True
+CC(C)Cc1ccc(C(C)C(=O)O)cc1,1.0,False,0.13408315,True
+O=C1NC(=O)c2cc(C(F)(F)F)ccc12,1.0,False,0.2854573,True
+O=C(O)CN(C(=O)c1ccccc1)c1ccc2ccccc2c1,0.0,True,0.61069727,True
+O=[N+]([O-])c1cc2cc(Cl)c3ccccc3c2o1,0.0,True,0.8471912,True
+Cc1sc2nc3oc(=O)cc(C)c3cc2c1C,0.0,True,0.9068117,True
+OCc1ccc(-n2cncn2)cc1,1.0,False,0.27603644,True
+Fc1ccc(CN2CCOCC2)cc1,1.0,False,0.288537,True
+CC(=O)OC1(c2ccccc2)Sc2ccccc2-n2cccc21,0.0,True,0.5987351,True
+Cn1c(-c2n[nH]c(O)n2)nc2ccccc21,0.0,True,0.9024725,True
