@@ -98,11 +98,8 @@ class ClassifierTrainer:
                               rank=self.rank, shuffle=True)
             if self.is_ddp else None
         )
-        self.val_sampler = (
-            DistributedSampler(val_dataset, num_replicas=self.world_size,
-                              rank=self.rank, shuffle=False)
-            if self.is_ddp else None
-        )
+        # Evaluate full validation set on all GPUs to ensure identical scheduler stepping
+        self.val_sampler = None
         
         self.train_loader = DataLoader(
             train_dataset,
