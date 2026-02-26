@@ -19,7 +19,7 @@ class ClassifierConfig:
     num_epochs: int = 50
     
     # Data
-    num_workers: int = 4  # Set to 0 on Windows, 4+ on Linux/DGX
+    num_workers: int = 0  # 0 because graphs are pre-cached; workers cause shared memory OOM
     val_split: float = 0.2
     data_path: str = 'data/classifier_dataset.csv'
     
