@@ -19,7 +19,7 @@ class ClassifierConfig:
     num_epochs: int = 50
     
     # Data
-    num_workers: int = 4
+    num_workers: int = 0  # 0 for Windows compatibility; set to 4 on Linux/Mac
     val_split: float = 0.2
     data_path: str = 'data/classifier_dataset.csv'
     
