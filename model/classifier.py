@@ -77,21 +77,20 @@ class ClassifierTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(hidden_dim)
         self.norm4 = nn.LayerNorm(hidden_dim)
     
-    def forward(self, h, edge_index, edge_attr, batch, node_features=None):
+    def forward(self, h, edge_index, edge_attr, batch, in_ring_flags=None):
         """
         Args:
             h: Node embeddings [N, hidden_dim]
             edge_index: [2, E]
             edge_attr: Edge embeddings [E, edge_dim]
             batch: Batch assignment [N]
-            node_features: Original node features for ring detection [N, feature_dim]
+            in_ring_flags: Pre-extracted in_ring flags [N] or full node features [N, F]
             
         Returns:
             h: Updated node embeddings [N, hidden_dim]
             edge_attr: Updated edge embeddings [E, edge_dim]
         """
         # Pre-norm + local attention + residual
-        # GraphAttentionLayer.forward returns (x_out, edge_attr_out)
         h_norm = self.norm1(h)
         e_norm = self.edge_norm(edge_attr)
         h_new, e_new = self.local_attn(h_norm, edge_index, e_norm)
@@ -99,7 +98,7 @@ class ClassifierTransformerBlock(nn.Module):
         edge_attr = edge_attr + e_new
         
         # Pre-norm + ring attention + residual
-        h = h + self.ring_attn(self.norm2(h), batch, node_features)
+        h = h + self.ring_attn(self.norm2(h), batch, in_ring_flags)
         
         # Pre-norm + global context + residual
         h = h + self.global_pool(self.norm3(h), batch)
@@ -188,8 +187,8 @@ class MolecularGlueClassifier(nn.Module):
         Returns:
             logits: Classification logits [B, 1]
         """
-        # Store original features for ring detection
-        original_x = x.clone()
+        # Extract in_ring flags before encoding (avoids cloning full tensor)
+        in_ring_flags = x[:, 20]  # in_ring feature at index 20
         
         # Encode inputs
         h = self.node_encoder(x)        # [N, hidden_dim]
@@ -197,7 +196,7 @@ class MolecularGlueClassifier(nn.Module):
         
         # Transformer blocks (edge features updated through layers)
         for layer in self.layers:
-            h, e = layer(h, edge_index, e, batch, original_x)
+            h, e = layer(h, edge_index, e, batch, in_ring_flags)
         
         # Final normalization
         h = self.final_norm(h)

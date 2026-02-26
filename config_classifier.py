@@ -19,7 +19,7 @@ class ClassifierConfig:
     num_epochs: int = 50
     
     # Data
-    num_workers: int = 0  # 0 because graphs are pre-cached; workers cause shared memory OOM
+    num_workers: int = 4  # Workers handle Batch.from_data_list collation; pre-cached graphs are small
     val_split: float = 0.2
     data_path: str = 'data/classifier_dataset.csv'
     

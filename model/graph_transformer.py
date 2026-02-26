@@ -212,12 +212,13 @@ class RingAttentionLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, batch: torch.Tensor, 
-                node_features: Optional[torch.Tensor] = None) -> torch.Tensor:
+                node_features=None) -> torch.Tensor:
         """
         Args:
             x: Node embeddings [N, hidden_dim]
             batch: Batch assignment [N]
-            node_features: Original node features for ring detection [N, feature_dim]
+            node_features: Either original node features [N, feature_dim] for ring
+                          detection (index 20), or pre-extracted in_ring flags [N].
         
         Returns:
             Updated node features with ring context
@@ -229,29 +230,35 @@ class RingAttentionLayer(nn.Module):
         k = self.k_proj(x).view(N, self.num_heads, self.head_dim)
         v = self.v_proj(x).view(N, self.num_heads, self.head_dim)
 
-        # Detect ring atoms (NEW - uses actual ring information)
+        # Detect ring atoms — accept pre-extracted flags or full feature matrix
         if node_features is not None:
-            # Assuming in_ring is at index 20 in node features
-            in_ring_mask = node_features[:, 20] > 0.5  # Boolean mask
+            if node_features.dim() == 1:
+                # Pre-extracted in_ring flags [N]
+                in_ring_mask = node_features > 0.5
+            else:
+                # Full feature matrix — in_ring is at index 20
+                in_ring_mask = node_features[:, 20] > 0.5
         else:
-            # Fallback: use all atoms
             in_ring_mask = torch.ones(N, dtype=torch.bool, device=device)
         
         num_graphs = batch.max().item() + 1
 
-        # Pool ring atoms per graph
+        # ---- Vectorized ring pooling (replaces Python for-loop) ----
         ring_k = torch.zeros(num_graphs, self.num_heads, self.head_dim, device=device)
         ring_v = torch.zeros(num_graphs, self.num_heads, self.head_dim, device=device)
-        ring_count = torch.zeros(num_graphs, device=device)
 
-        # Only aggregate ring atoms
-        for graph_id in range(num_graphs):
-            graph_mask = (batch == graph_id) & in_ring_mask
-            if graph_mask.sum() > 0:
-                ring_k[graph_id] = k[graph_mask].mean(dim=0)
-                ring_v[graph_id] = v[graph_mask].mean(dim=0)
-                ring_count[graph_id] = graph_mask.sum()
-        
+        if in_ring_mask.any():
+            ring_batch = batch[in_ring_mask]          # [R] graph IDs of ring atoms
+            ring_k_sel = k[in_ring_mask]              # [R, heads, head_dim]
+            ring_v_sel = v[in_ring_mask]              # [R, heads, head_dim]
+
+            # Expand index to match [R, heads, head_dim] shape
+            idx = ring_batch.view(-1, 1, 1).expand_as(ring_k_sel)
+
+            # scatter_mean via scatter_reduce
+            ring_k.scatter_reduce_(0, idx, ring_k_sel, reduce='mean', include_self=False)
+            ring_v.scatter_reduce_(0, idx, ring_v_sel, reduce='mean', include_self=False)
+
         # Broadcast ring context to all atoms
         node_ring_k = ring_k[batch]  # [N, heads, head_dim]
         node_ring_v = ring_v[batch]
@@ -260,9 +267,8 @@ class RingAttentionLayer(nn.Module):
         attn = (q * node_ring_k).sum(dim=-1) / math.sqrt(self.head_dim)  # [N, heads]
         
         # Higher attention for ring atoms
-        if node_features is not None:
-            attn = attn + in_ring_mask.float().unsqueeze(-1) * 0.5  # Bias for ring atoms
-        
+        attn = attn + in_ring_mask.float().unsqueeze(-1) * 0.5
+
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
 

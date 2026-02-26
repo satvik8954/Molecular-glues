@@ -88,6 +88,15 @@ class ClassifierTrainer:
         self.use_amp = self.device.type == 'cuda'
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
         
+        # ---- torch.compile for kernel fusion on modern GPUs ----
+        if self.device.type == 'cuda':
+            try:
+                self.model = torch.compile(self.model)
+                if self.is_main:
+                    print("  ⚡ torch.compile() enabled")
+            except Exception:
+                pass  # Graceful fallback if compile not supported
+        
         # ---- Data loaders ----
         use_pin = self.device.type == 'cuda'
         use_persistent = config.num_workers > 0
@@ -176,8 +185,8 @@ class ClassifierTrainer:
             self.train_sampler.set_epoch(self.epoch)
         
         total_loss = 0
-        all_preds = []
-        all_labels = []
+        all_preds = []   # GPU tensors, transferred once at epoch end
+        all_labels = []  # GPU tensors, transferred once at epoch end
         
         pbar = tqdm(self.train_loader, desc=f'Epoch {self.epoch}', 
                     disable=not self.is_main)
@@ -198,19 +207,20 @@ class ClassifierTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             
-            # Track metrics
+            # Track metrics on GPU (no per-iteration CPU transfer)
             total_loss += loss.item()
-            
-            preds = torch.sigmoid(logits).detach().cpu() > 0.5
-            all_preds.extend(preds.numpy())
-            all_labels.extend(batch.y.cpu().numpy())
+            all_preds.append((torch.sigmoid(logits).detach() > 0.5).float())
+            all_labels.append(batch.y.detach())
             
             # Update progress bar
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
         
-        # Compute epoch metrics
+        # Transfer to CPU once at epoch end
+        all_preds_np = torch.cat(all_preds).cpu().numpy()
+        all_labels_np = torch.cat(all_labels).cpu().numpy()
+        
         avg_loss = total_loss / len(self.train_loader)
-        accuracy = accuracy_score(all_labels, all_preds)
+        accuracy = accuracy_score(all_labels_np, all_preds_np)
         
         return {'loss': avg_loss, 'accuracy': accuracy}
     
