@@ -32,19 +32,30 @@ class ClassifierTrainer:
         
         self.model.to(self.device)
         
+        # Multi-GPU support with DataParallel
+        self.num_gpus = torch.cuda.device_count() if self.device.type == 'cuda' else 0
+        if self.num_gpus > 1:
+            print(f"  Using {self.num_gpus} GPUs with DataParallel!")
+            self.model = nn.DataParallel(self.model)
+            # Scale batch size by number of GPUs
+            config.batch_size = config.batch_size * self.num_gpus
+        
         # Mixed precision scaler for GPU speedup (~2x faster on modern GPUs)
         self.use_amp = self.device.type == 'cuda'
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
         
-        # Data loaders (pin_memory for faster CPU->GPU transfer)
+        # Data loaders (pin_memory + persistent workers + prefetch for speed)
         use_pin = self.device.type == 'cuda'
+        use_persistent = config.num_workers > 0
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=config.batch_size,
             shuffle=True,
             collate_fn=train_dataset.collate_fn,
             num_workers=config.num_workers,
-            pin_memory=use_pin
+            pin_memory=use_pin,
+            persistent_workers=use_persistent,
+            prefetch_factor=4 if config.num_workers > 0 else None
         )
         
         self.val_loader = DataLoader(
@@ -53,7 +64,9 @@ class ClassifierTrainer:
             shuffle=False,
             collate_fn=val_dataset.collate_fn,
             num_workers=config.num_workers,
-            pin_memory=use_pin
+            pin_memory=use_pin,
+            persistent_workers=use_persistent,
+            prefetch_factor=4 if config.num_workers > 0 else None
         )
         
         # Optimizer
@@ -102,7 +115,7 @@ class ClassifierTrainer:
         pbar = tqdm(self.train_loader, desc=f'Epoch {self.epoch}')
         
         for batch in pbar:
-            batch = batch.to(self.device)
+            batch = batch.to(self.device, non_blocking=True)
             
             # Forward pass with mixed precision
             with torch.amp.autocast('cuda', enabled=self.use_amp):
@@ -144,7 +157,7 @@ class ClassifierTrainer:
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc='Validation'):
-                batch = batch.to(self.device)
+                batch = batch.to(self.device, non_blocking=True)
                 
                 # Forward pass
                 logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch).squeeze(-1)
@@ -198,7 +211,12 @@ class ClassifierTrainer:
         """Main training loop."""
         print(f"Starting training for {num_epochs} epochs...")
         print(f"Device: {self.device}")
-        print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        if self.num_gpus > 1:
+            print(f"GPUs: {self.num_gpus}")
+        total_params = sum(p.numel() for p in self.model.parameters())
+        print(f"Model parameters: {total_params:,}")
+        print(f"Batch size: {self.config.batch_size} (effective)")
+        print(f"Data workers: {self.config.num_workers}")
         
         for epoch in range(num_epochs):
             self.epoch = epoch
@@ -245,13 +263,21 @@ class ClassifierTrainer:
         """Save model checkpoint."""
         checkpoint = {
             'epoch': self.epoch,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': (self.model.module.state_dict() 
+                                 if isinstance(self.model, nn.DataParallel) 
+                                 else self.model.state_dict()),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_acc': self.best_val_acc,
             'config': {
-                'hidden_dim': self.model.hidden_dim,
-                'num_layers': len(self.model.layers),
-                'num_heads': self.model.layers[0].local_attn.num_heads,
+                'hidden_dim': (self.model.module.hidden_dim 
+                               if isinstance(self.model, nn.DataParallel) 
+                               else self.model.hidden_dim),
+                'num_layers': len(self.model.module.layers 
+                                  if isinstance(self.model, nn.DataParallel) 
+                                  else self.model.layers),
+                'num_heads': (self.model.module.layers[0].local_attn.num_heads 
+                              if isinstance(self.model, nn.DataParallel) 
+                              else self.model.layers[0].local_attn.num_heads),
                 'dropout': self.config.dropout,
             },
         }
