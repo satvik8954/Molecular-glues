@@ -3,6 +3,13 @@
 Training pipeline for molecular glue classifier.
 Supports: single GPU, DataParallel, and DistributedDataParallel (DDP).
 
+Anti-overfitting features:
+- Early stopping with patience
+- Label smoothing
+- Focal loss (optional)
+- Gradient accumulation
+- OneCycleLR with warmup (optional)
+
 Usage:
   Single GPU:  python train_classifier.py --epochs 50
   Multi-GPU:   torchrun --nproc_per_node=NUM_GPUS train_classifier.py --epochs 50
@@ -10,6 +17,7 @@ Usage:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -32,6 +40,34 @@ def _get_raw_model(model):
     return model
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss focuses training on hard examples.
+    
+    FL(p_t) = -α(1 - p_t)^γ log(p_t)
+    
+    γ > 0 reduces loss for well-classified examples (p_t > 0.5),
+    making the model focus on hard-to-classify samples.
+    """
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+    
+    def forward(self, logits, targets):
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits, targets, reduction='none'
+        )
+        probs = torch.sigmoid(logits)
+        p_t = probs * targets + (1 - probs) * (1 - targets)
+        focal_weight = (1 - p_t) ** self.gamma
+        
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        loss = alpha_t * focal_weight * bce_loss
+        
+        return loss.mean()
+
+
 class ClassifierTrainer:
     """
     Training pipeline for molecular glue classifier.
@@ -41,6 +77,13 @@ class ClassifierTrainer:
       - 1 GPU: single GPU with AMP
       - N GPUs + torchrun: DistributedDataParallel (fastest)
       - N GPUs + python: DataParallel (fallback)
+    
+    Anti-overfitting features:
+      - Early stopping (configurable patience)
+      - Label smoothing (smooth targets to avoid confident predictions)
+      - Focal loss (optional, focuses on hard examples)
+      - Gradient accumulation (larger effective batch size)
+      - OneCycleLR with cosine annealing (optional)
     """
     
     def __init__(self, model, train_dataset, val_dataset, config):
@@ -88,15 +131,6 @@ class ClassifierTrainer:
         self.use_amp = self.device.type == 'cuda'
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
         
-        # ---- torch.compile for kernel fusion on modern GPUs ----
-        if self.device.type == 'cuda':
-            try:
-                self.model = torch.compile(self.model)
-                if self.is_main:
-                    print("  ⚡ torch.compile() enabled")
-            except Exception:
-                pass  # Graceful fallback if compile not supported
-        
         # ---- Data loaders ----
         use_pin = self.device.type == 'cuda'
         use_persistent = config.num_workers > 0
@@ -136,25 +170,56 @@ class ClassifierTrainer:
         )
         
         # ---- Optimizer ----
-        self.optimizer = torch.optim.Adam(
+        self.optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=config.learning_rate,
             weight_decay=config.weight_decay
         )
         
-        # Learning rate scheduler
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer,
-            mode='max',
-            factor=0.5,
-            patience=5
-        )
+        # ---- Learning rate scheduler ----
+        self.accumulation_steps = getattr(config, 'gradient_accumulation_steps', 1)
         
-        # Loss function
-        self.criterion = nn.BCEWithLogitsLoss()
+        if getattr(config, 'use_cosine_schedule', False):
+            # OneCycleLR: cosine annealing with 10% warmup — better convergence
+            steps_per_epoch = len(self.train_loader) // self.accumulation_steps
+            self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                self.optimizer,
+                max_lr=config.learning_rate,
+                epochs=config.num_epochs,
+                steps_per_epoch=steps_per_epoch,
+                pct_start=0.1,  # 10% warmup
+                anneal_strategy='cos'
+            )
+            self.scheduler_per_step = True
+        else:
+            # Fallback: ReduceLROnPlateau
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='max',
+                factor=0.5,
+                patience=5
+            )
+            self.scheduler_per_step = False
+        
+        # ---- Loss function ----
+        if getattr(config, 'use_focal_loss', False):
+            alpha = getattr(config, 'focal_alpha', 0.25)
+            gamma = getattr(config, 'focal_gamma', 2.0)
+            self.criterion = FocalLoss(alpha=alpha, gamma=gamma)
+            self._log("  Using Focal Loss")
+        else:
+            self.criterion = nn.BCEWithLogitsLoss()
+        
+        # Label smoothing factor
+        self.label_smoothing = getattr(config, 'label_smoothing', 0.0)
+        
+        # ---- Early stopping ----
+        self.early_stop_patience = getattr(config, 'early_stop_patience', 0)
+        self.best_val_loss = float('inf')
+        self.epochs_without_improvement = 0
         
         # Tracking
-        self.best_val_acc = 0.0
+        self.best_val_auc = 0.0
         self.epoch = 0
         
         # Create checkpoint directory (only on main process)
@@ -176,8 +241,21 @@ class ClassifierTrainer:
         if self.is_main:
             print(msg)
     
+    def _smooth_labels(self, y):
+        """
+        Apply label smoothing to targets.
+        
+        y' = y * (1 - ε) + ε/2
+        
+        This prevents the model from being overly confident, which
+        reduces overfitting to noisy labels.
+        """
+        if self.label_smoothing > 0:
+            return y * (1 - self.label_smoothing) + self.label_smoothing / 2
+        return y
+    
     def train_epoch(self):
-        """Train for one epoch."""
+        """Train for one epoch with gradient accumulation."""
         self.model.train()
         
         # Set epoch for DistributedSampler (ensures proper shuffling)
@@ -191,29 +269,54 @@ class ClassifierTrainer:
         pbar = tqdm(self.train_loader, desc=f'Epoch {self.epoch}', 
                     disable=not self.is_main)
         
-        for batch in pbar:
+        self.optimizer.zero_grad(set_to_none=True)
+        
+        for batch_idx, batch in enumerate(pbar):
             batch = batch.to(self.device, non_blocking=True)
+            
+            # Apply label smoothing
+            targets = self._smooth_labels(batch.y)
             
             # Forward pass with mixed precision
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch).squeeze(-1)
-                loss = self.criterion(logits, batch.y)
+                loss = self.criterion(logits, targets)
+                # Normalize for gradient accumulation
+                loss = loss / self.accumulation_steps
             
             # Backward pass with gradient scaling
-            self.optimizer.zero_grad(set_to_none=True)  # slightly faster than zero_grad()
             self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            
+            # Step optimizer every accumulation_steps
+            if (batch_idx + 1) % self.accumulation_steps == 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+                
+                # Step per-batch scheduler (OneCycleLR)
+                if self.scheduler_per_step:
+                    self.scheduler.step()
             
             # Track metrics on GPU (no per-iteration CPU transfer)
-            total_loss += loss.item()
+            total_loss += loss.item() * self.accumulation_steps  # un-normalize for logging
             all_preds.append((torch.sigmoid(logits).detach() > 0.5).float())
             all_labels.append(batch.y.detach())
             
             # Update progress bar
-            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+            pbar.set_postfix({
+                'loss': f'{loss.item() * self.accumulation_steps:.4f}',
+                'lr': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
+            })
+        
+        # Handle remaining gradients if total batches not divisible by accumulation_steps
+        if (batch_idx + 1) % self.accumulation_steps != 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad(set_to_none=True)
         
         # Transfer to CPU once at epoch end
         all_preds_np = torch.cat(all_preds).cpu().numpy()
@@ -241,7 +344,8 @@ class ClassifierTrainer:
                 # Forward pass (AMP for validation too)
                 with torch.amp.autocast('cuda', enabled=self.use_amp):
                     logits = self.model(batch.x, batch.edge_index, batch.edge_attr, batch.batch).squeeze(-1)
-                    loss = self.criterion(logits, batch.y)
+                    # Validation loss uses original labels (no smoothing)
+                    loss = F.binary_cross_entropy_with_logits(logits, batch.y)
                 
                 total_loss += loss.item()
                 
@@ -287,7 +391,7 @@ class ClassifierTrainer:
         }
     
     def train(self, num_epochs):
-        """Main training loop."""
+        """Main training loop with early stopping."""
         self._log(f"Starting training for {num_epochs} epochs...")
         self._log(f"Device: {self.device}")
         if self.is_ddp:
@@ -301,9 +405,14 @@ class ClassifierTrainer:
         total_params = sum(p.numel() for p in raw_model.parameters())
         self._log(f"Model parameters: {total_params:,}")
         self._log(f"Batch size per GPU: {self.config.batch_size}")
-        self._log(f"Effective batch size: {self.config.batch_size * self.world_size}")
+        self._log(f"Effective batch size: {self.config.batch_size * self.world_size * self.accumulation_steps}")
+        self._log(f"Gradient accumulation steps: {self.accumulation_steps}")
         self._log(f"Data workers: {self.config.num_workers}")
         self._log(f"Mixed precision: {self.use_amp}")
+        self._log(f"Label smoothing: {self.label_smoothing}")
+        self._log(f"Early stopping patience: {self.early_stop_patience}")
+        scheduler_name = "OneCycleLR (cosine)" if self.scheduler_per_step else "ReduceLROnPlateau"
+        self._log(f"LR scheduler: {scheduler_name}")
         
         for epoch in range(num_epochs):
             self.epoch = epoch
@@ -314,8 +423,9 @@ class ClassifierTrainer:
             # Validate
             val_metrics = self.validate()
             
-            # Learning rate scheduling
-            self.scheduler.step(val_metrics['accuracy'])
+            # Learning rate scheduling (epoch-level, for ReduceLROnPlateau)
+            if not self.scheduler_per_step:
+                self.scheduler.step(val_metrics['auc'])
             
             # Print metrics (main process only)
             self._log(f"\nEpoch {epoch}:")
@@ -323,6 +433,7 @@ class ClassifierTrainer:
             self._log(f"  Val   - Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}")
             self._log(f"          Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}")
             self._log(f"          F1: {val_metrics['f1']:.4f}, AUC: {val_metrics['auc']:.4f}")
+            self._log(f"          LR: {self.optimizer.param_groups[0]['lr']:.2e}")
             
             # Log to wandb (main process only)
             if self.use_wandb:
@@ -335,20 +446,35 @@ class ClassifierTrainer:
                     'val/recall': val_metrics['recall'],
                     'val/f1': val_metrics['f1'],
                     'val/auc': val_metrics['auc'],
-                    'epoch': epoch
+                    'lr': self.optimizer.param_groups[0]['lr'],
+                    'epoch': epoch,
+                    'train_val_gap': train_metrics['accuracy'] - val_metrics['accuracy'],
                 })
             
-            # Save best model (main process only)
-            if self.is_main and val_metrics['accuracy'] > self.best_val_acc:
-                self.best_val_acc = val_metrics['accuracy']
+            # ---- Save best model (by AUC — more robust than accuracy) ----
+            if self.is_main and val_metrics['auc'] > self.best_val_auc:
+                self.best_val_auc = val_metrics['auc']
                 self.save_checkpoint('best_classifier.pt')
-                self._log(f"  ✓ New best model! (val_acc={val_metrics['accuracy']:.4f})")
+                self._log(f"  ✓ New best model! (val_auc={val_metrics['auc']:.4f})")
+            
+            # ---- Early stopping ----
+            if self.early_stop_patience > 0:
+                if val_metrics['loss'] < self.best_val_loss:
+                    self.best_val_loss = val_metrics['loss']
+                    self.epochs_without_improvement = 0
+                else:
+                    self.epochs_without_improvement += 1
+                    if self.epochs_without_improvement >= self.early_stop_patience:
+                        self._log(f"\n⚠ Early stopping triggered! Val loss hasn't improved "
+                                  f"for {self.early_stop_patience} epochs.")
+                        self._log(f"  Best val loss: {self.best_val_loss:.4f}")
+                        break
             
             # Synchronize across processes
             if self.is_ddp:
                 dist.barrier()
         
-        self._log(f"\n✓ Training complete! Best val accuracy: {self.best_val_acc:.4f}")
+        self._log(f"\n✓ Training complete! Best val AUC: {self.best_val_auc:.4f}")
         
         # Cleanup DDP
         if self.is_ddp:
@@ -361,12 +487,13 @@ class ClassifierTrainer:
             'epoch': self.epoch,
             'model_state_dict': raw_model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'best_val_acc': self.best_val_acc,
+            'best_val_auc': self.best_val_auc,
             'config': {
                 'hidden_dim': raw_model.hidden_dim,
                 'num_layers': len(raw_model.layers),
                 'num_heads': raw_model.layers[0].local_attn.num_heads,
                 'dropout': self.config.dropout,
+                'drop_edge_rate': getattr(raw_model, 'drop_edge_rate', 0.0),
             },
         }
         path = os.path.join(self.config.checkpoint_dir, filename)

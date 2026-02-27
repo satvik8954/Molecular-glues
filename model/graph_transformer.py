@@ -131,12 +131,14 @@ class GraphAttentionLayer(MessagePassing):
         # Output projection
         self.W_o = nn.Linear(hidden_dim, hidden_dim)
         
-        # Edge feature update (NEW)
+        # Edge feature update (NEW) — with dropout + BatchNorm to prevent memorization
         self.edge_update_mlp = nn.Sequential(
             nn.Linear(hidden_dim * 2 + self.edge_dim, self.edge_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(self.edge_dim, self.edge_dim)
         )
+        self.edge_batch_norm = nn.BatchNorm1d(self.edge_dim)
 
         self.dropout = nn.Dropout(dropout)
         
@@ -164,10 +166,12 @@ class GraphAttentionLayer(MessagePassing):
         out = out.view(-1, self.hidden_dim)
         x_out = self.W_o(out)
         
-        # Update edge features (NEW)
+        # Update edge features (NEW) — dropout + BatchNorm for regularization
         src, dst = edge_index
         edge_input = torch.cat([x[src], x[dst], edge_attr], dim=-1)
-        edge_attr_out = edge_attr + self.edge_update_mlp(edge_input)  # Residual
+        edge_update = self.edge_update_mlp(edge_input)
+        edge_update = self.dropout(edge_update)
+        edge_attr_out = edge_attr + self.edge_batch_norm(edge_update)  # Residual + norm
         
         return x_out, edge_attr_out
 
@@ -244,8 +248,8 @@ class RingAttentionLayer(nn.Module):
         num_graphs = batch.max().item() + 1
 
         # ---- Vectorized ring pooling (replaces Python for-loop) ----
-        ring_k = torch.zeros(num_graphs, self.num_heads, self.head_dim, device=device)
-        ring_v = torch.zeros(num_graphs, self.num_heads, self.head_dim, device=device)
+        ring_k = torch.zeros(num_graphs, self.num_heads, self.head_dim, device=device, dtype=k.dtype)
+        ring_v = torch.zeros(num_graphs, self.num_heads, self.head_dim, device=device, dtype=v.dtype)
 
         if in_ring_mask.any():
             ring_batch = batch[in_ring_mask]          # [R] graph IDs of ring atoms
@@ -291,17 +295,19 @@ class GlobalGraphPool(nn.Module):
     def __init__(self, hidden_dim: int, dropout: float = 0.1):
         super().__init__()
         
-        # Global feature MLP
+        # Global feature MLP — with dropout for regularization
         self.global_mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Dropout(dropout),
         )
         
-        # Gating mechanism (NEW)
+        # Gating mechanism (NEW) — with dropout before sigmoid
         self.gate = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Dropout(dropout),
             nn.Sigmoid()
         )
 

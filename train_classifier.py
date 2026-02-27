@@ -42,10 +42,16 @@ def main(args):
         config.num_epochs = args.epochs
     if args.batch_size is not None:
         config.batch_size = args.batch_size
-    if args.data_path is not None:
-        config.data_path = args.data_path
+    if args.train_path is not None:
+        config.train_path = args.train_path
+    if args.val_path is not None:
+        config.val_path = args.val_path
     if args.lr is not None:
         config.learning_rate = args.lr
+    if args.dropout is not None:
+        config.dropout = args.dropout
+    if args.drop_edge_rate is not None:
+        config.drop_edge_rate = args.drop_edge_rate
     
     if is_main:
         print("=" * 80)
@@ -60,19 +66,20 @@ def main(args):
     if is_main:
         Path(config.checkpoint_dir).mkdir(parents=True, exist_ok=True)
     
-    # Datasets
+    # Datasets (separate scaffold-split files)
     if is_main:
         print("Loading datasets...")
     train_dataset = MolecularGlueClassifierDataset(
-        csv_file=config.data_path,
-        split='train',
-        val_split=config.val_split
+        csv_file=config.train_path,
+        split_name='train',
+        augment=config.use_augmentation,
+        augment_prob=config.augment_prob
     )
     
     val_dataset = MolecularGlueClassifierDataset(
-        csv_file=config.data_path,
-        split='val',
-        val_split=config.val_split
+        csv_file=config.val_path,
+        split_name='val',
+        augment=False  # Never augment validation data
     )
     
     # Model
@@ -82,7 +89,8 @@ def main(args):
         hidden_dim=config.hidden_dim,
         num_layers=config.num_layers,
         num_heads=config.num_heads,
-        dropout=config.dropout
+        dropout=config.dropout,
+        drop_edge_rate=config.drop_edge_rate
     )
     if is_main:
         print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -103,8 +111,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train molecular glue classifier')
     parser.add_argument('--epochs', type=int, default=None, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=None, help='Batch size per GPU')
-    parser.add_argument('--data_path', type=str, default=None, help='Path to CSV dataset')
+    parser.add_argument('--train_path', type=str, default=None, help='Path to training CSV')
+    parser.add_argument('--val_path', type=str, default=None, help='Path to validation CSV')
     parser.add_argument('--lr', type=float, default=None, help='Learning rate')
+    parser.add_argument('--dropout', type=float, default=None, help='Dropout rate')
+    parser.add_argument('--drop_edge_rate', type=float, default=None, help='DropEdge rate')
     
     args = parser.parse_args()
     main(args)

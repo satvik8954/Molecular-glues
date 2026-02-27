@@ -18,6 +18,7 @@ def evaluate_model(model_path, test_dataset):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     checkpoint = torch.load(model_path, map_location=device)
     config = checkpoint.get('config', {})
+    # Handle both old (no drop_edge_rate) and new checkpoint formats
     model = MolecularGlueClassifier(**config)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -109,10 +110,10 @@ def evaluate_model(model_path, test_dataset):
 
 
 if __name__ == '__main__':
-    # Load test dataset
+    # Load test dataset (scaffold-split)
     test_dataset = MolecularGlueClassifierDataset(
-        csv_file='data/classifier_dataset.csv',
-        split='val'
+        csv_file='data/classifier_test.csv',
+        split_name='test'
     )
     
     # Evaluate

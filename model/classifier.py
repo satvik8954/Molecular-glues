@@ -8,6 +8,11 @@ Built from existing Graph Transformer components:
 - GlobalGraphPool (gated global pooling)
 
 New: Classification head (3 linear layers → 1 logit)
+
+Anti-overfitting features:
+- DropEdge: randomly removes edges during training
+- Reduced FFN expansion (2× instead of 4×)
+- Higher dropout throughout (configurable, default 0.3)
 """
 
 import torch
@@ -31,6 +36,33 @@ from model.graph_transformer import (
 from config import ATOM_TYPES, BOND_TYPES, CHARGES, HYBRIDIZATIONS
 
 
+def drop_edge(edge_index, edge_attr, drop_rate=0.15, training=True):
+    """
+    DropEdge: randomly remove edges during training to prevent
+    over-reliance on specific graph topology.
+    
+    Args:
+        edge_index: [2, E]
+        edge_attr: [E, D]
+        drop_rate: fraction of edges to drop
+        training: only drop during training
+    
+    Returns:
+        edge_index, edge_attr with some edges removed
+    """
+    if not training or drop_rate <= 0:
+        return edge_index, edge_attr
+    
+    num_edges = edge_index.size(1)
+    keep_mask = torch.rand(num_edges, device=edge_index.device) > drop_rate
+    
+    # Ensure at least 1 edge per graph
+    if keep_mask.sum() == 0:
+        keep_mask[0] = True
+    
+    return edge_index[:, keep_mask], edge_attr[keep_mask]
+
+
 class ClassifierTransformerBlock(nn.Module):
     """
     Simplified version of MultiScaleBlock for classification.
@@ -45,6 +77,10 @@ class ClassifierTransformerBlock(nn.Module):
     - GlobalGraphPool (global context)
     - Feed-forward network
     - Pre-norm + residual connections
+    
+    Anti-overfitting changes:
+    - FFN expansion reduced from 4× to 2× hidden_dim
+    - Dropout applied throughout
     """
     
     def __init__(self, hidden_dim, num_heads, dropout, edge_dim=None):
@@ -61,12 +97,12 @@ class ClassifierTransformerBlock(nn.Module):
         )
         self.global_pool = GlobalGraphPool(hidden_dim, dropout)
         
-        # Feed-forward network (same as MultiScaleBlock)
+        # Feed-forward network — REDUCED from 4× to 2× expansion
         self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.Linear(hidden_dim, hidden_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.Dropout(dropout),
         )
         
@@ -118,12 +154,19 @@ class MolecularGlueClassifier(nn.Module):
     2. N × ClassifierTransformerBlock — reuses GraphAttention/Ring/GlobalPool
     3. Global mean+max pooling → graph-level representation
     4. Classification head → single logit (use BCEWithLogitsLoss)
+    
+    Anti-overfitting features:
+    - DropEdge during training (configurable rate)
+    - Reduced FFN expansion (2× instead of 4×)
+    - Higher dropout in classifier head (dropout + 0.1 above backbone)
     """
     
-    def __init__(self, hidden_dim=256, num_layers=4, num_heads=8, dropout=0.1):
+    def __init__(self, hidden_dim=128, num_layers=3, num_heads=8, dropout=0.3,
+                 drop_edge_rate=0.15):
         super().__init__()
         
         self.hidden_dim = hidden_dim
+        self.drop_edge_rate = drop_edge_rate
         
         # Input dimensions (from config.py vocabularies)
         # Node: atom_types(10) + charges(5) + hybridizations(4) + aromatic(1) + in_ring(1) + num_hs(1) + conjugated(1) = 23
@@ -160,16 +203,18 @@ class MolecularGlueClassifier(nn.Module):
         
         # Classification head (the only truly new component)
         # mean+max pooling gives 2*hidden_dim features
+        # Uses higher dropout (dropout + 0.1) since this is where most memorization happens
+        head_dropout = min(dropout + 0.1, 0.5)
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.Dropout(dropout),
+            nn.Dropout(head_dropout),
             
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.LayerNorm(hidden_dim // 2),
             nn.GELU(),
-            nn.Dropout(dropout),
+            nn.Dropout(head_dropout),
             
             nn.Linear(hidden_dim // 2, 1)  # Single logit for binary classification
         )
@@ -194,9 +239,14 @@ class MolecularGlueClassifier(nn.Module):
         h = self.node_encoder(x)        # [N, hidden_dim]
         e = self.edge_encoder(edge_attr) # [E, hidden_dim]
         
+        # DropEdge: randomly remove edges during training
+        edge_index_used, e_used = drop_edge(
+            edge_index, e, self.drop_edge_rate, self.training
+        )
+        
         # Transformer blocks (edge features updated through layers)
         for layer in self.layers:
-            h, e = layer(h, edge_index, e, batch, in_ring_flags)
+            h, e_used = layer(h, edge_index_used, e_used, batch, in_ring_flags)
         
         # Final normalization
         h = self.final_norm(h)
