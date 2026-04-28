@@ -8,7 +8,7 @@ Anti-overfitting features:
 - Label smoothing
 - Focal loss (optional)
 - Gradient accumulation
-- OneCycleLR with warmup (optional)
+- OneCycleLR with warmup 
 
 Usage:
   Single GPU:  python train_classifier.py --epochs 50

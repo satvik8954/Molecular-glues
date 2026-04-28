@@ -1,0 +1,135 @@
+============================================================
+  MOLECULAR GLUE CLASSIFIER - COMPREHENSIVE DIAGNOSTICS
+============================================================
+
+  Train: 45764 molecules
+  Test:  5721 molecules
+
+============================================================
+  DIAGNOSTIC 1: Simple Feature Baselines
+============================================================
+  If simple features achieve high AUC, the GNN may be
+  learning the same shortcuts rather than real chemistry.
+
+  Extracting features...
+  Train: 45764, Test: 5721
+
+  --- Single-Feature Baselines ---
+              MW: AUC=0.4844  Acc=0.4178
+            LogP: AUC=0.7827  Acc=0.7355 ⚠ SHORTCUT!
+           Rings: AUC=0.7713  Acc=0.7191 ⚠ SHORTCUT!
+       AromRings: AUC=0.5637  Acc=0.5261
+      HeavyAtoms: AUC=0.5556  Acc=0.6081
+             HBD: AUC=0.6062  Acc=0.6394
+             HBA: AUC=0.6497  Acc=0.6467
+            TPSA: AUC=0.5971  Acc=0.6469
+        FracCSP3: AUC=0.4474  Acc=0.4171
+        RotBonds: AUC=0.6271  Acc=0.5950
+        NumAtoms: AUC=0.5556  Acc=0.6081
+        NumBonds: AUC=0.5896  Acc=0.6203
+
+  --- Multi-Feature Baselines ---
+/home/jovyan/.conda/envs/mol-glue/lib/python3.14/site-packages/sklearn/linear_model/_logistic.py:406: ConvergenceWarning: lbfgs failed to converge after 1000 iteration(s) (status=1):
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT
+
+Increase the number of iterations to improve the convergence (max_iter=1000).
+You might also want to scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+      LogisticRegression: AUC=0.9087  Acc=0.8500  F1=0.8593 ⚠ SHORTCUT!
+            RandomForest: AUC=0.9938  Acc=0.9628  F1=0.9629 ⚠ SHORTCUT!
+        GradientBoosting: AUC=0.9730  Acc=0.9168  F1=0.9186 ⚠ SHORTCUT!
+
+  --- Random Forest Feature Importances ---
+            LogP: 0.1311  ██████
+            TPSA: 0.1188  █████
+        FracCSP3: 0.1135  █████
+             HBD: 0.1102  █████
+           Rings: 0.0974  ████
+       AromRings: 0.0907  ████
+        RotBonds: 0.0838  ████
+              MW: 0.0677  ███
+        NumBonds: 0.0510  ██
+             HBA: 0.0467  ██
+      HeavyAtoms: 0.0463  ██
+        NumAtoms: 0.0427  ██
+
+============================================================
+  DIAGNOSTIC 2: Feature Distribution Overlap
+============================================================
+  ✓ Saved feature_distributions.png
+
+============================================================
+  DIAGNOSTIC 3: Cross-Split Tanimoto Leakage
+============================================================
+  High similarity between test and train molecules suggests
+  the scaffold split isn't providing true generalization.
+
+  Computing fingerprints...
+  Leakage check: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████| 500/500 [00:00<00:00, 7412.76it/s]
+
+  Max test→train Tanimoto similarity:
+    Mean:   0.4522
+    Median: 0.4757
+    Max:    0.9737
+    >0.8:   6 (1.2%)
+    >0.9:   1 (0.2%)
+    =1.0:   0 (0.0%)
+  ✓ Saved cross_split_leakage.png
+
+============================================================
+  DIAGNOSTIC 4: Trivial SMILES Shortcuts
+============================================================
+
+  Train set:
+    Glue SMILES length:     mean=76 ± 19
+    Non-glue SMILES length: mean=70 ± 29
+    SMILES-length-only LR:  Acc=0.5705  AUC=0.6003
+    ⚠ SMILES length can partially separate classes!
+
+  Test set:
+    Glue SMILES length:     mean=87 ± 19
+    Non-glue SMILES length: mean=78 ± 30
+    SMILES-length-only LR:  Acc=0.5969  AUC=0.6173
+    ⚠ SMILES length can partially separate classes!
+
+============================================================
+  DIAGNOSTIC 6: Scaffold Diversity Check
+============================================================
+  Unique scaffolds in test: 5721
+  Singletons (1 molecule):  5721 (100.0%)
+  Top 10 scaffolds:
+       1 molecules  labels={1: 1}  O=C1CCC(N2C(=O)c3ccc(N4CCN(C(=O)c5cccc(N6CCCC6)c5)C5(CC5)C4)...
+       1 molecules  labels={1: 1}  O=C1CCC(N2C(=O)c3ccc(NCCCc4cc(C(=O)N5CCN(C(c6ccccc6)c6ccccc6...
+       1 molecules  labels={0: 1}  O=C1C/C=C\CC23C(=O)NC(Cc4ccccc4)C2C=CCC3/C=C/CC1...
+       1 molecules  labels={1: 1}  O=C1CCC(N2C(=O)c3cccc(CCC4CCC(CNC5CN(C(=O)c6ccc(-n7cnnn7)cc6...
+       1 molecules  labels={0: 1}  O=C(CNC(=O)Cn1c(-c2cccs2)ncc(NC(=O)OCc2ccccc2)c1=O)COC(=O)c1...
+       1 molecules  labels={1: 1}  O=C(CCC(=O)N1CCN(Cc2ccc(NC(=O)C3NNCC3Nc3ncnc4[nH]ccc34)cc2)C...
+       1 molecules  labels={0: 1}  O=C(Nc1ccc(Cc2ccc(NC(=O)C(=O)C3C(=O)NC(=S)NC3=O)cc2)cc1)C(=O...
+       1 molecules  labels={0: 1}  O=C(NCCn1c(=O)ccn(Cc2ccc(-c3ccccc3-c3nn[nH]n3)cc2)c1=O)NC1CC...
+       1 molecules  labels={0: 1}  C(/C=C/c1[nH]c2nc3ccccc3nc2[nH+]1)=C1\Cc2ccccc2N1...
+       1 molecules  labels={0: 1}  O=C(Nc1ccccc1)Nc1nc2n[nH]c(N3CCNCC3)c2c2nc(-c3ccco3)nn12...
+
+============================================================
+  DIAGNOSTIC 5: Model Curves (PR, Calibration, Confidence)
+============================================================
+TEST dataset: 5721 molecules
+  Glues: 2860
+  Non-glues: 2861
+  Pre-converting SMILES to graphs...
+  ✓ 5721 graphs cached in memory                                                                                                                              
+  ✓ Saved model_curves.png
+
+  Model Performance:
+    ROC AUC:          0.9881
+    Avg Precision:    0.9906
+    Mean P(glue):     0.9484 (should be ~1.0)
+    Mean P(non-glue): 0.0702 (should be ~0.0)
+    Uncertain (0.3-0.7): 15 samples
+
+============================================================
+  DIAGNOSTICS COMPLETE
+  Plots saved to: diagnostics/
+============================================================

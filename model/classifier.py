@@ -33,7 +33,7 @@ from model.graph_transformer import (
     RingAttentionLayer,
     GlobalGraphPool
 )
-from config import ATOM_TYPES, BOND_TYPES, CHARGES, HYBRIDIZATIONS
+from config_classifier import ATOM_TYPES, BOND_TYPES, CHARGES, HYBRIDIZATIONS
 
 
 def drop_edge(edge_index, edge_attr, drop_rate=0.15, training=True):
@@ -65,11 +65,6 @@ def drop_edge(edge_index, edge_attr, drop_rate=0.15, training=True):
 
 class ClassifierTransformerBlock(nn.Module):
     """
-    Simplified version of MultiScaleBlock for classification.
-    
-    Removed vs MultiScaleBlock:
-    - No FiLM conditioning (no property targets)
-    - No time embedding (no diffusion timesteps)
     
     Kept:
     - GraphAttentionLayer (local attention)
@@ -113,7 +108,7 @@ class ClassifierTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(hidden_dim)
         self.norm4 = nn.LayerNorm(hidden_dim)
     
-    def forward(self, h, edge_index, edge_attr, batch, in_ring_flags=None):
+    def forward(self, h, edge_index, edge_attr, batch,in_ring_flags=None):
         """
         Args:
             h: Node embeddings [N, hidden_dim]
@@ -219,7 +214,7 @@ class MolecularGlueClassifier(nn.Module):
             nn.Linear(hidden_dim // 2, 1)  # Single logit for binary classification
         )
     
-    def forward(self, x, edge_index, edge_attr, batch):
+    def forward(self, x, edge_index, edge_attr, batch,in_ring_flags=None):
         """
         Forward pass for classification.
         
@@ -246,7 +241,7 @@ class MolecularGlueClassifier(nn.Module):
         
         # Transformer blocks (edge features updated through layers)
         for layer in self.layers:
-            h, e_used = layer(h, edge_index_used, e_used, batch, in_ring_flags)
+            h, e_used = layer(h, edge_index_used, e_used, batch,in_ring_flags)
         
         # Final normalization
         h = self.final_norm(h)
@@ -260,3 +255,4 @@ class MolecularGlueClassifier(nn.Module):
         logits = self.classifier(h_graph)  # [B, 1]
         
         return logits
+        

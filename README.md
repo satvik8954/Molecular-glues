@@ -1,210 +1,91 @@
-# Molecular Glue Diffusion Model & Classifier
+# Molecular Glue Classifier
 
-A graph-based deep learning system for molecular glue discovery, featuring both a **generative diffusion model** and a **binary classifier** built on shared Graph Transformer components.
-
-## Features
-
-- **Discrete Diffusion**: D3PM-style categorical noise for atom/bond types
-- **Graph Transformer**: Multi-head attention with edge features, ring-centric attention, and global pooling
-- **Binary Classifier**: Predicts whether a molecule is a molecular glue (reuses ~80% of diffusion model code)
-- **Chemical Validity**: RDKit-based validation and filtering
-- **Drug-Likeness**: Lipinski Rule of Five and glue-specific property filters
-- **Interpretability**: Integrated gradients for atom-level importance visualization
-
-## Installation
-
-```bash
-pip install -r requirements.txt
-```
-
-Requires:
-- Python 3.8+
-- PyTorch 2.0+
-- RDKit 2023.03+
-- PyTorch Geometric 2.3+
-- scikit-learn 1.0+
+This document serves as the main entry point and guide for the **Classifier** portion of the Molecular Glues project. The classifier determines whether a given molecule (SMILES string) is a likely molecular glue out of an embedded graph structure.
 
 ---
 
-## Quick Start
+## 🏗️ Architecture at a Glance
 
-### Diffusion Model
+- **Model:** Graph Transformer with node, edge, and optional global context pooling (`model/classifier.py`).
+- **Layers:** Uses `GraphAttentionLayer` from the  architecture but introduces `ClassifierTransformerBlock`.
+- **Pre-Processing:** Standard Graph encoding with fixed `drop_edge_rate` to prevent GNN topological overfitting.
+- **Config:** Fully controlled via `config_classifier.py`.
+
+---
+
+## 🚀 Usage Guide
+
+### 1. Data Preparation
+To start training, you must construct the classifier dataset. Make sure you have positive components (glues) and negative counterparts (non-glues, ideally matched on molecular weight via stratification, or sampled as hard negatives).
 
 ```bash
-# Quick test (5 epochs, small model)
-python train_model.py --quick_test
+# Create proper scaffold splits to prevent data leakage
+python create_classifier_data.py
+```
+This generates `data/classifier_train.csv`, `data/classifier_val.csv`, and `data/classifier_test.csv` containing SMILES and a binary `label`.
 
-# Full training
-python train_model.py --epochs 100 --batch_size 64
+*(Note: Data loaders are defined in `data/classifier_dataset.py`)*
 
-# Generate molecules
-python generate_molecules.py \
-    --checkpoint checkpoints/best_model.pt \
-    --n_molecules 1000 \
-    --output generated.csv
+### 2. Single-Run Training
+To train the classifier once using the current config:
 
-# Analyze outputs
-python eval/analyze.py \
-    --input generated.csv \
-    --training_data data/glue_chemotypes.csv
+```bash
+python train_classifier.py --epochs 50 --lr 1e-4 --batch_size 64
 ```
 
-### Classifier
+*(You can also use multi-GPU via `torchrun`). Check `config_classifier.py` for all hyperparameter defaults.*
+Checkpoints fall into the `checkpoints/classifier/` directory out of the box.
+
+### 3. Multi-Seed Training (For robust metrics)
+Neural network initializations vary randomly. To prove robust classification performance, run a multi-seed experiment:
 
 ```bash
-# Full pipeline (data prep → train → evaluate)
-bash run_classifier_pipeline.sh
+python run_multi_seed.py --num_seeds 5 --epochs 30
+```
+This script trains the model independently across random seeds, evaluates them on the test set, and reports averaged baseline statistics (AUC, MCC, F1, Accuracy, SPCC, PCC, Precision, Recall).
 
-# Quick test (10 epochs, skip data prep if CSV exists)
-bash run_classifier_pipeline.sh --skip-data --epochs 10
+### 4. Evaluation
+Evaluate the final trained model on the unseen test set:
 
-# Custom settings
-bash run_classifier_pipeline.sh --epochs 100 --batch-size 64 --lr 5e-5
-
-# Or run training directly
-python train_classifier.py --epochs 50 --data_path data/classifier_dataset.csv
-
-# Evaluate trained model
+```bash
 python evaluate_classifier.py
+```
+This script generates overall model statistics and creates figures natively:
+- `roc_curve.png` (ROC-AUC performance)
+- `confusion_matrix.png` (Confusion Matrix Heatmap)
+- `evaluation_metrics.csv` (Spreadsheet of Accuracy, F1, MCC, SPCC, etc.)
+- `error_cases.csv` (Lists all false positives / false negatives)
 
-# Interpret predictions (atom-level importance)
+### 5. Deep Diagnostics
+If your model is achieving 99% accuracy off the bat, it's likely learning shortcuts (like predicting on molecular weight or sequence length rather than molecular bonds). 
+
+Run the comprehensive diagnostics script to uncover data leakage and plot performance distributions for features:
+
+```bash
+python scripts/diagnose_classifier.py --checkpoint checkpoints/classifier/best_classifier.pt
+```
+*Outputs into `diagnostics/`.*
+
+### 6. Interpretability (Attribution Visualizations)
+To understand **why** the model predicted a molecule to be a glue or non-glue, generate an RDKit attribution map:
+
+```bash
 python interpret_classifier.py
 ```
-
-#### Classifier CLI Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--epochs` | 50 | Number of training epochs |
-| `--batch_size` | 32 | Batch size |
-| `--lr` | 1e-4 | Learning rate |
-| `--data_path` | `data/classifier_dataset.csv` | Path to CSV with `SMILES` and `label` columns |
-
-#### Pipeline Script Options
-
-| Flag | Description |
-|------|-------------|
-| `--skip-data` | Skip data preparation (use existing CSV) |
-| `--epochs N` | Override number of epochs |
-| `--batch-size N` | Override batch size |
-| `--lr F` | Override learning rate |
-| `--data-path PATH` | Override dataset path |
+The script runs gradients backward into input atom features and scales them, highlighting the specific atoms (green = important in prediction) that contributed to the model's forward pass!
 
 ---
 
-## Project Structure
+## 🛠 File Hierarchy Map
 
-```
-├── config.py                    # Diffusion model configuration
-├── config_classifier.py         # Classifier configuration
-├── train_model.py               # Diffusion training script
-├── train_classifier.py          # Classifier training script
-├── run_classifier_pipeline.sh   # Full classifier pipeline (data → train → eval)
-├── generate_molecules.py        # Molecule generation script
-├── evaluate_classifier.py       # Classifier evaluation & metrics
-├── interpret_classifier.py      # Atom-level prediction interpretation
-│
-├── data/
-│   ├── molecular_graph.py       # SMILES ↔ graph conversion (shared)
-│   ├── dataset.py               # Diffusion dataset
-│   ├── classifier_dataset.py    # Classifier dataset
-│   ├── glue_chemotypes.csv      # Known molecular glues
-│   └── chembl_druglike.csv      # Drug-like non-glues
-│
-├── data_prep/
-│   └── collect_classifier_data.py  # Balanced dataset collection
-│
-├── model/
-│   ├── graph_transformer.py     # Shared transformer layers
-│   └── classifier.py            # Classifier model
-│
-├── train/
-│   ├── trainer.py               # Diffusion trainer
-│   └── classifier_trainer.py    # Classifier trainer
-│
-├── generate/                    # Generation & post-processing
-├── eval/                        # Metrics & analysis
-└── tests/                       # Unit tests
-```
-
----
-
-## Architecture
-
-### Shared Components (in `model/graph_transformer.py`)
-
-Both models share the same core transformer layers:
-
-| Component | Description |
-|-----------|-------------|
-| `GraphAttentionLayer` | Multi-head attention with edge feature updates |
-| `RingAttentionLayer` | Ring-centric attention using molecular ring information |
-| `GlobalGraphPool` | Gated global mean pooling for graph-level context |
-
-### Diffusion Model
-
-```
-SMILES → Graph → Node/Edge Encoders → Time Embed + FiLM Conditioning
-                                       ↓
-                              MultiScaleBlock × 8
-                                       ↓
-                              7 Denoising Heads (atom type, charge, bond type, ...)
-```
-
-- **Purpose**: Generate novel molecules from noise
-- **Parameters**: ~15M
-- **Loss**: Multi-objective (atom, bond, property, valency)
-
-### Classifier
-
-```
-SMILES → Graph → Node/Edge Encoders → ClassifierTransformerBlock × 4
-                                       ↓
-                              Mean + Max Pooling
-                                       ↓
-                              Classification Head → Glue / Non-Glue
-```
-
-- **Purpose**: Predict if a molecule is a molecular glue
-- **Parameters**: ~7M
-- **Loss**: Binary cross-entropy
-- **Metrics**: Accuracy, Precision, Recall, F1, AUC-ROC
-
-### What the Classifier Removes vs. Diffusion
-
-| Diffusion-only Component | Why Removed |
-|--------------------------|-------------|
-| `SinusoidalPositionEmbeddings` | No diffusion timestep in classification |
-| `PropertyEmbedding` (FiLM) | No property conditioning needed |
-| `NoiseScheduler` | No denoising process |
-| 7 output heads | Replaced by single binary classification head |
-
----
-
-## Molecular Glue Properties
-
-Target molecules with:
-- MW: 200-500 Da
-- Aromatic/heterocyclic scaffolds
-- Mixed polarity (TPSA 20-120)
-- Multiple H-bond interaction points
-- Low rotatable bonds (<8)
-
-### Dataset Format
-
-The classifier expects a CSV file with two columns:
-
-```csv
-SMILES,label
-O=C1CCC(=O)N1c1cccc2[nH]ccc12,1
-CC(=O)Oc1ccccc1C(=O)O,0
-```
-
-- `label=1`: Molecular glue
-- `label=0`: Non-glue
-
----
-
-## License
-
-MIT
+| File/Folder | Purpose |
+| ----------- | ------- |
+| **`config_classifier.py`** | Central configuration file for classifier training parameters. |
+| **`model/classifier.py`** | PyTorch model (`MolecularGlueClassifier`) and Graph Transformer layers. |
+| **`data/classifier_dataset.py`** | Dataset class for extracting features from SMILES specifically for classification. |
+| **`train_classifier.py`** | Main entry script to train the classifier locally or via DDP. |
+| **`train/classifier_trainer.py`** | PyTorch training loop, batching, and loss computation object. |
+| **`evaluate_classifier.py`** | Tests `best_classifier.pt` and dumps metrics + plots. |
+| **`run_multi_seed.py`** | Trains N classifier models consecutively to report mean and standard deviation. |
+| **`interpret_classifier.py`** | Script creating heatmap visual attributions mapping model predictions back onto specific RDKit atoms. |
+| **`scripts/diagnose_classifier.py`** | Data validation framework to check for trivial chemical shortcuts and leakage. |

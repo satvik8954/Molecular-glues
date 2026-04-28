@@ -234,7 +234,7 @@ def main():
     parser.add_argument('--glue_path', default='data/glue_chemotypes.smi',
                         help='Path to glue molecules (.smi)')
     parser.add_argument('--neg_paths', nargs='+', 
-                        default=['data/zinc15_druglike.smi', 'data/chembl_druglike.csv'],
+                        default=['data/chembl_mw_diverse.csv'],
                         help='Paths to negative molecule files (.smi or .csv). '
                              'Multiple files are pooled together for better MW coverage.')
     parser.add_argument('--seed', type=int, default=42)

@@ -15,7 +15,7 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from config import (
+from config_classifier import (
     ATOM_TYPES, ATOM_TO_IDX, BOND_TYPES, BOND_TO_IDX,
     CHARGES, CHARGE_TO_IDX, HYBRIDIZATIONS, HYBRID_TO_IDX
 )

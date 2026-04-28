@@ -6,22 +6,22 @@ from dataclasses import dataclass
 class ClassifierConfig:
     """Configuration for classifier training."""
     
-    # Model — reduced capacity to prevent overfitting
-    hidden_dim: int = 128          # Was 256 — cuts params ~4× (7M → 1.8M)
-    num_layers: int = 3            # Was 4 — slightly fewer layers
+    
+    hidden_dim: int = 128       
+    num_layers: int = 3            
     num_heads: int = 8
-    dropout: float = 0.3           # Was 0.1 — stronger regularization
+    dropout: float = 0.3       
     
     # Training
-    batch_size: int = 64           # Use 64-128 on GPU, 32 on CPU
+    batch_size: int = 128       
     learning_rate: float = 1e-4
-    weight_decay: float = 1e-3     # Was 1e-5 — 100× stronger L2 regularization
+    weight_decay: float = 1e-3    
     num_epochs: int = 50
     
     # Regularization
     label_smoothing: float = 0.05  # Smooth labels: y' = y * 0.95 + 0.025
     drop_edge_rate: float = 0.15   # Randomly drop 15% of edges during training
-    early_stop_patience: int = 10  # Stop if val loss doesn't improve for 10 epochs
+    early_stop_patience: int = 5  # Stop if val loss doesn't improve for 5 epochs
     
     # Augmentation
     use_augmentation: bool = True  # Graph augmentation (node masking + edge dropping)
@@ -48,3 +48,18 @@ class ClassifierConfig:
     
     # Paths
     checkpoint_dir: str = 'checkpoints/classifier'
+# Atom type vocabulary
+ATOM_TYPES = ['C', 'N', 'O', 'S', 'F', 'Cl', 'Br', 'P', 'I', 'Other']
+ATOM_TO_IDX = {atom: idx for idx, atom in enumerate(ATOM_TYPES)}
+
+# Bond type vocabulary
+BOND_TYPES = ['NONE', 'SINGLE', 'DOUBLE', 'TRIPLE', 'AROMATIC']
+BOND_TO_IDX = {bond: idx for idx, bond in enumerate(BOND_TYPES)}
+
+# Charge vocabulary
+CHARGES = [-2, -1, 0, 1, 2]
+CHARGE_TO_IDX = {charge: idx for idx, charge in enumerate(CHARGES)}
+
+# Hybridization vocabulary
+HYBRIDIZATIONS = ['SP', 'SP2', 'SP3', 'OTHER']
+HYBRID_TO_IDX = {h: idx for idx, h in enumerate(HYBRIDIZATIONS)}

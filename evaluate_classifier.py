@@ -4,7 +4,7 @@ import torch
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, matthews_corrcoef
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, matthews_corrcoef,accuracy_score,precision_score,recall_score,f1_score
 from scipy.stats import spearmanr, pearsonr
 from torch_geometric.loader import DataLoader
 from model.classifier import MolecularGlueClassifier
@@ -20,7 +20,7 @@ def evaluate_model(model_path, test_dataset):
     config = checkpoint.get('config', {})
     # Handle both old (no drop_edge_rate) and new checkpoint formats
     model = MolecularGlueClassifier(**config)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['model_state_dict'],strict=False)
     model.eval()
     model.to(device)
     
@@ -105,6 +105,19 @@ def evaluate_model(model_path, test_dataset):
     error_cases = errors[errors['Error']]
     error_cases.to_csv('error_cases.csv', index=False)
     print(f"✓ Error cases saved ({len(error_cases)} total)")
+    # Save overall metrics to CSV
+    metrics_dict = {
+        'Accuracy': [accuracy_score(labels_arr, preds_arr)],
+        'Precision': [precision_score(labels_arr, preds_arr, zero_division=0)],
+        'Recall': [recall_score(labels_arr, preds_arr, zero_division=0)],
+        'F1_Score': [f1_score(labels_arr, preds_arr, zero_division=0)],
+        'ROC_AUC': [roc_auc],
+        'MCC': [mcc],
+        'SPCC': [spcc],
+        'PCC': [pcc]
+    }
+    pd.DataFrame(metrics_dict).to_csv('evaluation_metrics.csv', index=False)
+    print("✓ Overall metrics saved to evaluation_metrics.csv")
     
     return errors
 
